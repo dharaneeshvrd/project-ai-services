@@ -1,12 +1,11 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: "{{ .AppName }}--chat-bot"
+  name: "{{ .AppName }}--chat-bot-1"
   labels:
     ai-services.io/application: "{{ .AppName }}"
-    ai-services.io/port/UI_PORT: "3000" # containerPort
   annotations:
-    ai-services.io/ui--UI_PORT-expose: "3000" # containerPort
+    ai-services.io/ui--UI_PORT1-expose: "3000" # containerPort
 spec:
   containers:
     - name: ui
@@ -18,11 +17,11 @@ spec:
           memory: "5Gi"
       env:
         - name: BACKEND_HOST
-          value: "{{ .AppName  }}--chat-bot"
+          value: "{{ .AppName  }}--chat-bot-1"
         - name: BACKEND_PORT
-          value: "5000" 
+          value: "5001" 
       ports:
-        - name: UI_PORT
+        - name: UI_PORT1
           containerPort: 3000
           protocol: TCP
     - name: backend-server
@@ -31,6 +30,7 @@ spec:
         - "/var/venv/bin/python"
         - "-m"
         - "retrieve.backend_server"
+        - "5001"
       env:
         - name: EMB_ENDPOINT
           value: "http://{{ .AppName  }}--vllm-server:8001"
@@ -64,8 +64,8 @@ spec:
           name: cache
           readOnly: true
       ports:
-        - containerPort: 5000
-          hostPort: 5000
+        - containerPort: 5001
+          hostPort: 5001
           protocol: TCP
   volumes:
     - name: cache

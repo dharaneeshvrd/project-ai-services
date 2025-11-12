@@ -5,4 +5,4 @@ smtLevel: 2
 podTemplateExecutions:
   - [milvus.yaml.tmpl, vllm-server.yaml.tmpl]
   - [clean-docs.yaml.tmpl]
-  - [ingest-docs.yaml.tmpl, chat-bot.yaml.tmpl]
+  - [ingest-docs.yaml.tmpl, chat-bot.yaml.tmpl, chat-bot-1.yaml.tmpl, chat-bot-2.yaml.tmpl]
