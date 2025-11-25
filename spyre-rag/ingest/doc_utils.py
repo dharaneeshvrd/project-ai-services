@@ -1,8 +1,9 @@
 import json
 import time
+import fitz
 import logging
 import os
-os.environ['GRPC_VERBOSITY'] = 'ERROR' 
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import pdfplumber
@@ -19,13 +20,13 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 from sentence_splitter import SentenceSplitter
 
 from common.llm_utils import classify_text_with_llm, summarize_table, tokenize_with_llm
-from common.misc_utils import set_log_level, get_logger, generate_file_checksum, verify_checksum
-
-logging.getLogger('docling').setLevel(logging.CRITICAL)
+from common.misc_utils import get_logger, generate_file_checksum, verify_checksum, set_log_level
+from ingest.header import get_outlines, get_matching_header_lvl
 
 set_log_level(logging.DEBUG)
-logger = get_logger("Docling")
+logging.getLogger('docling').setLevel(logging.CRITICAL)
 
+logger = get_logger("Docling")
 
 IMAGE_RESOLUTION_SCALE = 1.0
 excluded_labels = {
@@ -102,23 +103,12 @@ def find_text_font_size(
 
 def process_converted_document(res, pdf_path, out_path, gen_model, gen_endpoint, start_time, timings):
     logger.info(f"Processing '{pdf_path}'")
-    
+
     doc_json = res.export_to_dict()
     stem = Path(pdf_path).stem
     logging.debug(f"stem: {stem}")
-    # Initialize TocHeaders to get the Table of Contents (TOC)
-    toc_headers = None
-    """
-    try:
-        toc_mapper = TocPageMapper(pdf_path)
-        toc_mapper.match_toc_to_pages(threshold=80)
-        page_mapping = toc_mapper.get_page_mapping()
-        logger.debug(f"page_mapping: {page_mapping}")
-        toc_mapper.close()
-        toc_headers = TocHeaders(pdf_path, page_mapping)
-    except Exception as e:
-        logger.debug(f"No TOC found or failed to load TOC: {e}")
-    """
+
+    toc = get_outlines(pdf_path)
 
     # --- Text Extraction ---
     t0 = time.time()
@@ -131,6 +121,8 @@ def process_converted_document(res, pdf_path, out_path, gen_model, gen_endpoint,
             block_parent = block.get('parent', {}).get('$ref', '')
             if 'tables' in block_parent:
                 table_captions.append(block)
+            elif 'pictures' in block_parent:
+                image_captions.append(block)
     timings['extract_text_blocks'] = time.time() - t0
 
     if len(filtered_blocks):
@@ -141,7 +133,7 @@ def process_converted_document(res, pdf_path, out_path, gen_model, gen_endpoint,
         # timings['llm_filter_text'] = time.time() - t0
 
         filtered_text_dicts = filtered_blocks
-
+        logger.info(f"filtered_text_dicts: {filtered_text_dicts[0]}")
         structured_output = []
 
         last_header_level = 0  # To track the last header level in case we don't find it in TOC
@@ -162,23 +154,47 @@ def process_converted_document(res, pdf_path, out_path, gen_model, gen_endpoint,
                     if page_no is None or bbox_dict is None:
                         continue
 
-                    # Fallback to font size extraction if no TOC match is found
-                    matches = find_text_font_size(pdf_path, text_obj.get("text", ""), page_no - 1)
+                    # Use TocHeaders to get the markdown header prefix from TOC if available
+                    if toc:
+                        header_prefix = get_matching_header_lvl(toc, text_obj.get("text", ""), page_no)
+                        if header_prefix:
+                            logger.info(f"header_prefix: {header_prefix}, header: {text_obj.get('text', '')}")
+                            # If TOC matches, use the level from TOC
+                            structured_output.append({
+                                "label": label,
+                                "text": f"{header_prefix} {text_obj.get('text', '')}",
+                                "page": page_no,
+                                "font_size": None,  # Font size isn't necessary if TOC matches
+                            })
+                            last_header_level = len(header_prefix.strip())  # Update last header level
+                        else:
+                            # If no match, use the previous header level + 1
+                            new_header_level = last_header_level + 1
+                            logger.info(f"new_header_level: {'#' * new_header_level}, header: {text_obj.get('text', '')}")
+                            structured_output.append({
+                                "label": label,
+                                "text": f"{'#' * new_header_level} {text_obj.get('text', '')}",
+                                "page": page_no,
+                                "font_size": None,  # Font size isn't necessary if TOC matches
+                            })
+                    else:
+                        # Fallback to font size extraction if no TOC match is found
+                        matches = find_text_font_size(pdf_path, text_obj.get("text", ""), page_no - 1)
 
-                    if len(matches):
-                        font_size = 0
-                        count = 0
-                        for match in matches:
-                            font_size += match["font_size"] if match["match_score"] == 100 else 0
-                            count += 1 if match["match_score"] == 100 else 0
-                        font_size = font_size / count if count else None
+                        if len(matches):
+                            font_size = 0
+                            count = 0
+                            for match in matches:
+                                font_size += match["font_size"] if match["match_score"] == 100 else 0
+                                count += 1 if match["match_score"] == 100 else 0
+                            font_size = font_size / count if count else None
 
-                        structured_output.append({
-                            "label": label,
-                            "text": text_obj.get("text", ""),
-                            "page": page_no,
-                            "font_size": round(font_size, 2) if font_size else None
-                        })
+                            structured_output.append({
+                                "label": label,
+                                "text": text_obj.get("text", ""),
+                                "page": page_no,
+                                "font_size": round(font_size, 2) if font_size else None
+                            })
             else:
                 structured_output.append({
                     "label": label,
@@ -190,12 +206,9 @@ def process_converted_document(res, pdf_path, out_path, gen_model, gen_endpoint,
         timings["font_size_extraction"] = time.time() - t0
 
         (Path(out_path) / f"{stem}_clean_text.json").write_text(json.dumps(structured_output, indent=2), encoding="utf-8")
-        
+
     else:
         (Path(out_path) / f"{stem}_clean_text.json").write_text(json.dumps(filtered_blocks, indent=2), encoding="utf-8")
-
-    if toc_headers:
-        toc_headers.close()  # Close the TOC handler when done processing
 
     # --- Table Extraction ---
     if len(res.tables):
@@ -266,14 +279,13 @@ def convert_and_process(path, doc_converter, out_path, llm_model, llm_endpoint):
     except Exception as e:
         logger.error(f"Error converting or processing {path}: {e}")
 
-
 def extract_document_data(input_paths, out_path, llm_model, llm_endpoint, force=False):
     # Accelerator & pipeline options
     pipeline_options = PdfPipelineOptions()
 
     # Docling model files are getting downloaded to this /var/docling-models dir by this project-ai-services/images/rag-base/download_docling_models.py script in project-ai-services/images/rag-base/Containerfile
     pipeline_options.artifacts_path = "/var/docling-models"
-    
+
     pipeline_options.do_table_structure = True
     pipeline_options.table_structure_options.do_cell_matching = True
     pipeline_options.do_ocr = False
@@ -281,7 +293,7 @@ def extract_document_data(input_paths, out_path, llm_model, llm_endpoint, force=
 
     # Skip files that already exist by matching the cached checksum of the pdf
     # if there is no difference in checksum and processed text & table json also exist, would skip for convert and process list
-    # else add the file to convert and process list(filtered_input_paths) 
+    # else add the file to convert and process list(filtered_input_paths)
     filtered_input_paths = []
     for path in input_paths:
         f = (Path(out_path) / f"{Path(path).stem}.checksum")
@@ -418,11 +430,11 @@ def flush_chunk(current_chunk, chunks, llm_endpoint, max_tokens):
     current_chunk["source_nodes"] = []
 
 
-def chunk_single_file(input_path, output_path, llm_endpoint, max_tokens=512):    
+def chunk_single_file(input_path, output_path, llm_endpoint, max_tokens=512):
     if not Path(output_path).exists():
         with open(input_path, "r") as f:
             data = json.load(f)
-        
+
         font_size_levels = collect_header_font_sizes(data)
 
         chunks = []
@@ -520,6 +532,7 @@ def hierarchical_chunk_with_token_split(input_paths, output_paths, llm_endpoint,
             futures.append(executor.submit(chunk_single_file, input_path, output_path, llm_endpoint, max_tokens))
 
         # Wait for all futures to finish and handle exceptions
+
         for future in futures:
             try:
                 future.result()  # Capture exceptions if any
@@ -528,7 +541,7 @@ def hierarchical_chunk_with_token_split(input_paths, output_paths, llm_endpoint,
     logger.info("Chunks creation completed")
 
 
-def create_chunk_documents(in_txt_f, in_tab_f, orig_fn, include_meta_info_in_main_text):
+def create_chunk_documents(in_txt_f, in_tab_f, orig_fn, skip_meta):
     logger.info(f"Creating combined chunk documents from '{in_txt_f}' & '{in_tab_f}'")
     with open(in_txt_f, "r") as f:
         txt_data = json.load(f)
@@ -548,9 +561,11 @@ def create_chunk_documents(in_txt_f, in_tab_f, orig_fn, include_meta_info_in_mai
                 meta_info += f"Subsection: {block.get('subsection_title')} "
             if block.get('subsubsection_title'):
                 meta_info += f"Subsubsection: {block.get('subsubsection_title')} "
+            page_cont = f'{meta_info}\n{block.get("content")}' if not skip_meta else block.get("content")
+            logger.info(f"page_cont: {page_cont}")
             txt_docs.append({
                 # "chunk_id": txt_id,
-                "page_content": f'{meta_info}\n{block.get("content")}' if include_meta_info_in_main_text else block.get("content"),
+                "page_content": page_cont,
                 "filename": orig_fn,
                 "type": "text",
                 "source": meta_info,

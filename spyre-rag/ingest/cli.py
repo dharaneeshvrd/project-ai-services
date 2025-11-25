@@ -17,7 +17,7 @@ def reset_db():
     vector_store.reset_collection()
     logger.info(f"✅ Cleaned Vector DB: {collection_name}")
 
-def ingest(directory_path, include_meta_info_in_main_text):
+def ingest(directory_path, skip_meta):
     logger.info(f"Ingestion started from dir '{directory_path}'")
     emb_model_dict, llm_model_dict, _ = get_model_endpoints()
     # Initialize/reset the database before processing any files
@@ -42,13 +42,13 @@ def ingest(directory_path, include_meta_info_in_main_text):
     output_chunk_files = [f.replace('_clean_text.json', '_clean_chunk.json') for f in input_txt_files]
     hierarchical_chunk_with_token_split(
         input_txt_files, output_chunk_files, llm_model_dict["llm_endpoint"],
-        max_tokens=emb_model_dict['max_tokens'] - 100 if include_meta_info_in_main_text else emb_model_dict['max_tokens']
+        max_tokens=emb_model_dict['max_tokens'] - 100 if not skip_meta else emb_model_dict['max_tokens']
     )
     combined_filtered_chunks = []
     for in_chunk_f, in_tab_f, orig_fn in zip(output_chunk_files, input_tab_files, original_filenames):
         # Combine all chunks (text, image summaries, table summaries)
         filtered_chunks = create_chunk_documents(
-            in_chunk_f, in_tab_f, orig_fn, include_meta_info_in_main_text)
+            in_chunk_f, in_tab_f, orig_fn, skip_meta)
         combined_filtered_chunks.extend(filtered_chunks)
 
     # Insert data into Milvus
@@ -76,7 +76,7 @@ def main():
 
     ingest_parser = command_parser.add_parser("ingest", help="Ingest the DOCs", description="Ingest the DOCs into Milvus after all the processing\n", formatter_class=argparse.RawTextHelpFormatter)
     ingest_parser.add_argument("--path", type=str, default="/var/docs", help="Path to the documents that needs to be ingested into the RAG")
-    ingest_parser.add_argument("--include-meta", action="store_true", help="Include meta info while ingesting the docs")
+    ingest_parser.add_argument("--skip-meta", action="store_true", help="Skip meta info while ingesting the docs")
 
     command_parser.add_parser("clean-db", help="Clean the DB", description="Clean the Milvus DB\n", formatter_class=argparse.RawTextHelpFormatter)
 
@@ -87,7 +87,7 @@ def main():
         set_log_level(logging.INFO)
 
     if command_args.command == "ingest":
-        ingest(command_args.path, command_args.include_meta)
+        ingest(command_args.path, command_args.skip_meta)
     elif command_args.command == "clean-db":
         reset_db()
 
