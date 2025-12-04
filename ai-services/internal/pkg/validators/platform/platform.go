@@ -17,7 +17,7 @@ func NewPlatformRule() *PlatformRule {
 }
 
 func (r *PlatformRule) Name() string {
-	return "platform"
+	return "rhel"
 }
 
 func (r *PlatformRule) Verify() error {
