@@ -8,11 +8,9 @@ os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 from pathlib import Path
-from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import DoclingDocument
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from concurrent.futures import as_completed, ProcessPoolExecutor
-from docling.document_converter import DocumentConverter, PdfFormatOption
 from sentence_splitter import SentenceSplitter
 
 from common.llm_utils import create_llm_session, classify_text_with_llm, summarize_table, tokenize_with_llm
@@ -39,8 +37,27 @@ POOL_SIZE = 8
 
 create_llm_session(pool_maxsize=POOL_SIZE)
 
-def process_converted_document(res, pdf_path, out_path, gen_model, gen_endpoint, start_time, timings):    
-    doc_json = res.export_to_dict()
+doc_converter = None
+pipeline_options = None
+
+def initialize_worker_doc_converter(options):
+    """Initializes the Docling converter inside each worker process."""
+    global doc_converter
+    global pipeline_options
+    
+    # Imports MUST be inside the initializer or worker function for process isolation
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.datamodel.base_models import InputFormat
+
+    pipeline_options = options
+    
+    # NOTE: The DocumentConverter is created with its full, native memory footprint here.
+    doc_converter = DocumentConverter(
+        allowed_formats=[InputFormat.PDF],
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+    )
+
+def process_converted_document(res: DoclingDocument, pdf_path, out_path, gen_model, gen_endpoint, start_time, timings):    
     stem = Path(pdf_path).stem
 
     # Initialize TocHeaders to get the Table of Contents (TOC)
@@ -60,8 +77,8 @@ def process_converted_document(res, pdf_path, out_path, gen_model, gen_endpoint,
     # --- Text Extraction ---
     t0 = time.time()
     filtered_blocks, table_captions = [], []
-    for block in doc_json.get('texts', []):
-        block_type = block.get('label', '')
+    for block in res.texts:
+        block_type = block.text
         if block_type not in excluded_labels:
             filtered_blocks.append(block)
         if block_type == 'caption':
@@ -72,12 +89,10 @@ def process_converted_document(res, pdf_path, out_path, gen_model, gen_endpoint,
 
     if len(filtered_blocks):
 
-        filtered_text_dicts = filtered_blocks
-
         structured_output = []
         last_header_level = 0
         t0 = time.time()
-        for text_obj in tqdm_wrapper(filtered_text_dicts, desc=f"Processing text content of '{pdf_path}'"):
+        for text_obj in tqdm_wrapper(filtered_blocks, desc=f"Processing text content of '{pdf_path}'"):
             label = text_obj.get("label", "")
 
             # Check if it's a section header and process TOC or fallback to font size extraction
@@ -184,7 +199,8 @@ def process_converted_document(res, pdf_path, out_path, gen_model, gen_endpoint,
         logger.debug(f"  {k:<30}: {v:.2f}s")
     return page_count, table_count
 
-def convert_and_process(path, doc_converter, out_path, llm_model, llm_endpoint):
+def convert_and_process(path, out_path, llm_model, llm_endpoint):
+    global doc_converter
     try:
         logger.info(f"Processing '{path}'")
         timings = {}
@@ -196,7 +212,7 @@ def convert_and_process(path, doc_converter, out_path, llm_model, llm_endpoint):
             logger.debug("Loading from converted json")
             with Path(str(f)).open("r") as fp:
                 doc_dict = json.load(fp)
-                converted_doc = DoclingDocument.model_validate(doc_dict)
+                converted_doc = DoclingDocument.load_from_json(doc_dict)
         else:
             logger.debug(f"Not exist, converting '{path}'")
             start_time = time.time()
@@ -244,17 +260,11 @@ def extract_document_data(input_paths, out_path, llm_model, llm_endpoint, force=
         checksum = generate_file_checksum(path)
         (Path(out_path) / f"{Path(path).stem}.checksum").write_text(checksum, encoding='utf-8')
 
-    doc_converter = DocumentConverter(
-        allowed_formats=[
-            InputFormat.PDF
-        ],
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
-    )
     converted_pdf_stats = {}
     if filtered_input_paths:
-        with ProcessPoolExecutor(max_workers=max(1, min(4, len(filtered_input_paths)))) as executor:
+        with ProcessPoolExecutor(max_workers=max(1, min(4, len(filtered_input_paths))), initializer=initialize_worker_doc_converter, initargs=(pipeline_options, )) as executor:
             futures = [
-                executor.submit(convert_and_process, path, doc_converter, out_path, llm_model, llm_endpoint)
+                executor.submit(convert_and_process, path, out_path, llm_model, llm_endpoint)
                 for path in filtered_input_paths
             ]
             for future in as_completed(futures):
