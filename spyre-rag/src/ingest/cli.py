@@ -39,60 +39,42 @@ def ingest(directory_path):
     out_path = setup_cache_dir(collection_name)
 
     start_time = time.time()
-    converted_files, converted_pdf_stats = extract_document_data(
-        input_file_paths, out_path, llm_model_dict['llm_model'], llm_model_dict['llm_endpoint'])
-    if not converted_files:
-        ingestion_failed()
-        return
-    logger.debug(f"Converted files: {converted_files}")
-
-    original_filenames, input_txt_files, input_tab_files = get_txt_tab_filenames(converted_files, out_path)
-    chunk_files = [f.replace(text_suffix, chunk_suffix) for f in input_txt_files]
-    chunked_files = hierarchical_chunk_with_token_split(
-        input_txt_files, chunk_files, emb_model_dict["emb_endpoint"],
-        max_tokens=emb_model_dict['max_tokens'] - 100
-    )
-    if not chunked_files:
-        ingestion_failed()
-        return
-    logger.debug(f"Chunked files: {chunked_files}")
-
-    combined_filtered_chunks = []
-    for in_chunk_f, in_tab_f, orig_fn in zip(chunked_files, input_tab_files, original_filenames):
-        # Combine all chunks (text, image summaries, table summaries)
-        filtered_chunks = create_chunk_documents(
-            in_chunk_f, in_tab_f, orig_fn)
-        combined_filtered_chunks.extend(filtered_chunks)
-
-    if not combined_filtered_chunks:
+    combined_chunks, processed_files, converted_pdf_stats = process_documents(
+        input_file_paths, out_path, llm_model_dict['llm_model'], llm_model_dict['llm_endpoint'],  emb_model_dict["emb_endpoint"],
+        max_tokens=emb_model_dict['max_tokens'] - 100)
+    if not processed_files:
         ingestion_failed()
         return
 
-    logger.info("Loading converted documents into DB")
-    # Insert data into Milvus
-    vector_store.insert_chunks(
-        emb_model=emb_model_dict['emb_model'],
-        emb_endpoint=emb_model_dict['emb_endpoint'],
-        max_tokens=emb_model_dict['max_tokens'],
-        chunks=combined_filtered_chunks
-    )
-    logger.info("Converted documents loaded into DB")
+    if combined_chunks:
+        logger.info("Loading processed documents into DB")
+        # Insert data into Milvus
+        vector_store.insert_chunks(
+            emb_model=emb_model_dict['emb_model'],
+            emb_endpoint=emb_model_dict['emb_endpoint'],
+            max_tokens=emb_model_dict['max_tokens'],
+            chunks=combined_chunks
+        )
+        logger.info("Processed documents loaded into DB")
 
     # Log time taken for the file
     end_time = time.time()  # End the timer for the current file
     file_processing_time = end_time - start_time
     
-    unprocessed_files = get_unprocessed_files(input_file_paths, chunked_files)
+    unprocessed_files = get_unprocessed_files(input_file_paths, processed_files)
     if len(unprocessed_files):
         logger.info(f"Ingestion completed partially, please re-run the ingestion again to ingest the following files.\n{"\n".join(unprocessed_files)}\nIf the issue still persists, please report an issue in https://github.com/IBM/project-ai-services/issues")
     else:
         logger.info(f"✅ Ingestion completed successfully, Time taken: {file_processing_time:.2f} seconds. You can query your documents via chatbot")
     if not converted_pdf_stats:
         return
-    
-    logger.info(f"Stats of processed PDFs:")
-    max_file_len = max(len(key) for key in converted_pdf_stats.keys())
+
     total_pages = sum(converted_pdf_stats[file]["page_count"] for file in converted_pdf_stats)
+    if not total_pages:
+        return
+    
+    print("Stats of processed PDFs:")
+    max_file_len = max(len(key) for key in converted_pdf_stats.keys())
     total_tables = sum(converted_pdf_stats[file]["table_count"] for file in converted_pdf_stats)
 
     header_format = f"| {"PDF":<{max_file_len}} | {"Total Pages":^{15}} | {"Total Tables":>{15}} |"
@@ -100,7 +82,8 @@ def ingest(directory_path):
     print(header_format)
     print("-" * len(header_format))
     for file in converted_pdf_stats:
-        print(f"| {file:<{max_file_len}} | {converted_pdf_stats[file]["page_count"]:^{15}} | {converted_pdf_stats[file]["table_count"]:>{15}} |")
+        if converted_pdf_stats[file]["page_count"] > 0:
+            print(f"| {file:<{max_file_len}} | {converted_pdf_stats[file]["page_count"]:^{15}} | {converted_pdf_stats[file]["table_count"]:>{15}} |")
     print("-" * len(header_format))
     print(f"| {"Total":<{max_file_len}} | {total_pages:^{15}} | {total_tables:>{15}} |")
     print("-" * len(header_format))
@@ -130,7 +113,7 @@ if command_args.debug:
 set_log_level(log_level)
 
 from common.db_utils import MilvusVectorStore
-from ingest.doc_utils import extract_document_data, hierarchical_chunk_with_token_split, create_chunk_documents
+from ingest.doc_utils import process_documents
 
 logger = get_logger("Ingest")
 
