@@ -9,7 +9,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 from pathlib import Path
 from docling.datamodel.document import DoclingDocument, TextItem
-from concurrent.futures import as_completed, ProcessPoolExecutor
+from concurrent.futures import as_completed, ProcessPoolExecutor, ThreadPoolExecutor
 from sentence_splitter import SentenceSplitter
 
 from common.llm_utils import create_llm_session, classify_text_with_llm, summarize_table, tokenize_with_llm
@@ -22,7 +22,9 @@ logging.getLogger('docling').setLevel(logging.CRITICAL)
 
 logger = get_logger("Docling")
 
-PROCESS_POOL_SIZE = 4
+CONVERTER_POOL_SIZE = 6
+PROCESSOR_POOL_SIZE = 6
+CHUNKER_POOL_SIZE = 4
 
 is_debug = logger.isEnabledFor(logging.DEBUG) 
 tqdm_wrapper = None
@@ -40,21 +42,11 @@ POOL_SIZE = 8
 
 create_llm_session(pool_maxsize=POOL_SIZE)
 
-doc_converter = None
-pipeline_options = None
-
-def initialize_doc_converter():
-    """Initializes the Docling converter inside each worker process."""
-    global doc_converter
-    global pipeline_options
-
-    # Imports MUST be inside the initializer or worker function for process isolation
+def get_doc_converter():
     from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
-    # Accelerator & pipeline options
     pipeline_options = PdfPipelineOptions()
-    # Docling model files are getting downloaded to this /var/docling-models dir by this project-ai-services/images/rag-base/download_docling_models.py script in project-ai-services/images/rag-base/Containerfile
     pipeline_options.artifacts_path = "/var/docling-models"
     
 
@@ -62,11 +54,11 @@ def initialize_doc_converter():
     pipeline_options.table_structure_options.do_cell_matching = True
     pipeline_options.do_ocr = False
 
-    # NOTE: The DocumentConverter is created with its full, native memory footprint here.
     doc_converter = DocumentConverter(
         allowed_formats=[InputFormat.PDF],
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
+    return doc_converter
 
 def process_converted_document(converted_json_path, pdf_path, out_path, conversion_stats, gen_model, gen_endpoint, emb_endpoint, max_tokens):    
     stem = Path(pdf_path).stem
@@ -230,7 +222,7 @@ def process_converted_document(converted_json_path, pdf_path, out_path, conversi
         return None, None, None, None, None, None
 
 def convert_document(pdf_path, conversion_stats, out_path):
-    global doc_converter
+    doc_converter = get_doc_converter()
     try:
         logger.info(f"Processing '{pdf_path}'")
         converted_json = (Path(out_path) / f"{Path(pdf_path).stem}_converted.json")
@@ -292,13 +284,12 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
         (Path(out_path) / f"{Path(path).stem}.checksum").write_text(checksum, encoding='utf-8')
 
     try:
-        pool_size = min(PROCESS_POOL_SIZE, len(filtered_input_paths))
         converted_pdf_stats = {}
         processed_chunk_json_paths, processed_table_json_paths = [], []
 
-        with ProcessPoolExecutor(max_workers=pool_size, initializer=initialize_doc_converter) as converter_executor, \
-            ProcessPoolExecutor(max_workers=pool_size) as processor_executor, \
-            ProcessPoolExecutor(max_workers=pool_size) as chunker_executor:
+        with ProcessPoolExecutor(max_workers=min(CONVERTER_POOL_SIZE, len(filtered_input_paths))) as converter_executor, \
+            ThreadPoolExecutor(max_workers=min(PROCESSOR_POOL_SIZE, len(filtered_input_paths))) as processor_executor, \
+            ProcessPoolExecutor(max_workers=min(CHUNKER_POOL_SIZE, len(filtered_input_paths))) as chunker_executor:
             conversion_futures = [
                 converter_executor.submit(convert_document, path, filtered_input_paths[path], out_path)
                 for path in filtered_input_paths
