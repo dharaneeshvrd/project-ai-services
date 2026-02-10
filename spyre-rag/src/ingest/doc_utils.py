@@ -21,8 +21,8 @@ logging.getLogger('docling').setLevel(logging.CRITICAL)
 
 logger = get_logger("Docling")
 
-LIGHT_PDF_POOL_SIZE = 4
-HEAVY_PDF_POOL_SIZE = 2
+WORKER_SIZE = 4
+HEAVY_PDF_CONVERT_WORKER_SIZE = 2
 
 HEAVY_PDF_PAGE_THRESHOLD = 500
 
@@ -348,14 +348,15 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
 
     try:
         # Light files can be processed in parallel with worker_size
-        worker_size = min(LIGHT_PDF_POOL_SIZE, len(light_files))
+        worker_size = min(WORKER_SIZE, len(light_files))
         l_stats, l_chunks, l_tables = _run_batch(
             light_files,
             convert_worker=worker_size,
             max_worker=worker_size,
         )
 
-        convert_worker_size = min(HEAVY_PDF_POOL_SIZE, len(heavy_files))
+        worker_size = min(WORKER_SIZE, len(heavy_files))
+        convert_worker_size = min(HEAVY_PDF_CONVERT_WORKER_SIZE, len(heavy_files))
         h_stats, h_chunks, h_tables = _run_batch(
             heavy_files,
             convert_worker=convert_worker_size, # Heavy files conversion should happen with less workers compared to light files conversion
