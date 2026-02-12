@@ -216,7 +216,7 @@ def process_converted_document(converted_json_path, pdf_path, out_path, conversi
 
         if not conversion_stats["table_processed"]:
             table_count, process_time = process_table(converted_doc, pdf_path, processed_table_json_path, gen_model, gen_endpoint)
-            timings["process_table"] = process_time
+            timings["process_tables"] = process_time
 
         return pdf_path, processed_text_json_path, processed_table_json_path, page_count, table_count, timings
     except Exception as e:
