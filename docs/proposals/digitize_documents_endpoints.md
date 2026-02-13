@@ -71,6 +71,14 @@ As per the requirement from PM, need to convert cli into microservice which expo
 | **429 Too Many Requests** | Rate Limit | Request denied due to high volume (throttling). |
 | **500 Internal Server Error** | Server Error | An unexpected error occurred on the server side. | 
 
+**Sample response:**
+
+```
+{
+    "result": ... // str/dict - str in case of md/text output_format & dict in case of json output format.
+}
+```
+
 ---
 
 ### POST /v1/ingestions - Asynchronous ingestion
