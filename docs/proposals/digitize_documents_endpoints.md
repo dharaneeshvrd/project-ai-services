@@ -213,6 +213,7 @@ After conversion, the document will be ingested via a structured processing pipe
                     "type": "digitization",
                     "output_format": "md",
                     "status": "completed",
+                    "message": "",
                     "digitized_at": "2026-01-10T10:02:00Z",
                     "timing_in_secs": {
                         "digitizing": 120,
@@ -229,6 +230,7 @@ After conversion, the document will be ingested via a structured processing pipe
                     "type": "digitization",
                     "output_format": "text",
                     "status": "in_progress",
+                    "message": "",
                     "digitized_at": null,
                     "timing_in_secs": {
                         "digitizing": 0,
@@ -297,6 +299,7 @@ After conversion, the document will be ingested via a structured processing pipe
             "type": "digitization",
             "output_format": "md",
             "status": "in_progress",
+            "message": "",
             "digitized_at": null,
             "timing_in_secs": {
                 "digitizing": 0,
@@ -307,7 +310,8 @@ After conversion, the document will be ingested via a structured processing pipe
             "pages": 0,
             "tables": 0
         }
-    ]
+    ],
+    "error": ""
 }
 ```
 
@@ -351,6 +355,7 @@ After conversion, the document will be ingested via a structured processing pipe
             "output_format": "md",
             "digitized_at": "2026-01-10T10:00:00Z",
             "status": "completed",
+            "message": "",
             "timing_in_secs": {
                 "digitizing": 120,
                 "processing": null,
@@ -367,6 +372,7 @@ After conversion, the document will be ingested via a structured processing pipe
             "output_format": "md",
             "digitized_at": "2026-01-10T10:00:00Z",
             "status": "in_progress",
+            "message": "",
             "timing_in_secs": {
                 "digitizing": 0,
                 "processing": null,
@@ -383,6 +389,7 @@ After conversion, the document will be ingested via a structured processing pipe
             "output_format": "json",
             "digitized_at": "2026-01-10T10:00:00Z",
             "status": "completed",
+            "message": "",
             "timing_in_secs": {
                 "digitizing": 120,
                 "processing": 300,
@@ -423,6 +430,7 @@ After conversion, the document will be ingested via a structured processing pipe
     "output_format": "json",
     "digitized_at": "2026-01-10T10:00:00Z",
     "status": "completed",
+    "message": "",
     "timing_in_secs": {
         "digitizing": 120,
         "processing": 300,
