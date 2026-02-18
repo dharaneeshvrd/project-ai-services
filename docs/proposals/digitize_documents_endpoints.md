@@ -11,7 +11,12 @@ In case if user wants to clean it up, can run below command which will clean up 
 ai-services application start <app-name> --pod=<app-name>--clean-docs 
 ```
 There is no option to just convert and not ingest the converted content into the vdb. 
- 
+
+## Non-Goals:
+
+- **Horizontal Scaling:** The service is architected for single-replica deployment; multi-replica configurations are not supported as they introduce contention that degrades the performance of the downstream vLLM inference engine.
+- **Duplicate Filename Resolution:** The system will not resolve or rename duplicate filenames within a single request payload; such requests will be rejected.
+
 ## Proposal: 
  
 Recognizing the need for a more scalable and accessible architecture, we are moving to convert the current CLI into a microservice that offers REST endpoints for digitize‑document tasks. The microservice will support the following capabilities:
@@ -44,7 +49,7 @@ After conversion, the document will be ingested via a structured processing pipe
 | **GET** | `/v1/documents/{id}` | Retrieves metadata of a specific document. |
 | **GET** | `/v1/documents/{id}/content` | Retrieves digitized content of the specific document. |
 | **DELETE** | `/v1/documents/{id}` | Removes a specific document from vdb & clear its cache. |
-| **DELETE** | `/v1/documents` | Bulk deletes all documents from vdb & cache. Required param `confirm=True` to proceed the deletion. |
+| **DELETE** | `/v1/documents` | Bulk deletes all documents from vdb & cache. Required param `confirm=true` to proceed the deletion. |
 
 ---
 
@@ -59,35 +64,32 @@ After conversion, the document will be ingested via a structured processing pipe
 **Description:**
 - User can pass one or more pdfs directly as a byte stream with the optional query params.
 - API Server should do following
+- Use semaphore based concurrency limiting to globally limit 2 requests for digitization and 1 request for ingestion.
 - Validate params to identify whether its a digitization or ingestion operation.
-
-- **In case of ingestion:**
-    - Validate no `LOCK` file exist to ensure there is no existing ingestion in progress.
-    - Create `LOCK` file in `/var/lib/ai-services/applications/<app-name>/cache/`.
-    - Start the ingestion in a background process.
-    - Generate a UUID as job_id.
-    - End the request with returning job_id as response and 202 Accepted status.
-
-    - Background ingestion process should do following
-        - Start the process pipeline.
-        - Atomically write status into `<job_id>_status.json` from main process to avoid race issues.
-        - Once done with ingestion, should remove the `LOCK` file and conclude the job.
-        - Keep `<job_id>_status.json` for preserving the history.
-
-- **In case of digitization**
-    - API Server would initiate a queue(max_size=10) and start a background thread that look for elements in the queue.
-    - Whenever a new reuqest received, API server would do following
-        - Check queue is not full, if it is full reject the request with 429.
-        - Do validation on the files submitted to avoid over loading server and starve the subsequent requests
-            - Number files should not exceed 4 in a request
-            - Number of pages should not exceed 500
-        - Generate a UUID as `job_id` to identify the digitization task.
-        - Write the pdfs in a staging directory `/var/lib/ai-services/applications/<app-name>/cache/staging/<job_id>`
-        - Add the digitization task into the queue.
-    - When background thread reads the task from the queue it submits the digitization request to a background process pool.
-    - Once all the documents are digitized in a particular task, background thread would update the status, cleanup the staging content, enqueue the next task and process it.
-    - *Note:* Digitization tasks run in an isolated worker pool and are not shared with the Ingestion worker pools.
-
+- Validation:
+    - In case of digitization:
+        - Only 1 file is allowed per request
+        - No limit on the number of pages
+    - In case of ingestion:
+        - There are no limits(number of files/number of pages per file)
+- Generate UUID for job as well as for documents.
+- Temporarily write the input documents into the staging directory `/var/cache/staging/<job_id>`
+- Write `<job_id>_status.json` inside `/var/cache` with initial status of job submission with submitted documents along with their UUIDs.
+- Start the ingestion in a background process.
+- End the request with returning `job_id` as response and 202 Accepted status.
+- Background process should do following
+    - Start the process pipeline.
+    - Atomically write status into `/var/cache/<job_id>_status.json` for every meaningful update happening in the pipeline. 
+    - Clean staged directory `/var/cache/staging/<job_id>` once the process completes.
+    - Keep `<job_id>_status.json` for preserving the history.
+- **Notes:** 
+    - Digitization tasks run in an isolated worker pool and are not shared with the Ingestion worker pools.
+    - `output_format` passed will be ignored in case of ingestion, .
+    - Users can submit digitized documents for ingestion; if the file is not cleaned using DELETE, the pipeline will use its cached version.
+    - `/var/cache` is the persistent volume mounted by the runtime(Podman/OpenShift) inside the digitize document service container. 
+    - In case of ingestion, fastapi's `BackgroundTasks` can be used to run the process pipeline. Since the pipeline itself will offload the heavy tasks to child process pools.
+    - In case of digitization, docling conversion needs a separate process, since its a CPU heavy task.
+    
 **Sample curl for ingestion:**
 ```
 > curl -X 'POST' \ 
@@ -124,14 +126,10 @@ After conversion, the document will be ingested via a structured processing pipe
 }
 ```
 
-**Note:**
-- `output_format` passed will be ignored in case of ingestion, .
-- Users can submit digitized documents for ingestion; if the file is not cleaned using DELETE, the pipeline will use its cached version.
-
 ---
 
 ### GET /v1/documents/jobs
-- Returns status of all the submitted jobs(ingestion/digitization)
+- Returns high level status of all the submitted jobs(ingestion/digitization)
 
 **Query Params:**
 - latest - bool  - Optional param to return the latest ingestion status
@@ -167,8 +165,6 @@ After conversion, the document will be ingested via a structured processing pipe
             "operation": "ingestion",
             "status": "completed",
             "submitted_at": "2025-12-10T16:40:00Z",
-            "total_pages": 123,
-            "total_tables": 20,
             "documents": [
                 {...}
             ],
@@ -179,8 +175,6 @@ After conversion, the document will be ingested via a structured processing pipe
             "operation": "digitization",
             "status": "in_progress",
             "submitted_at": "2026-01-10T10:00:00Z",
-            "total_pages": 343,
-            "total_tables": 57,
             "documents": [
                 {...}
             ],
@@ -190,7 +184,7 @@ After conversion, the document will be ingested via a structured processing pipe
 }
 ```
 
-**With latest=True**
+**With latest=true**
 ```
 {
     "pagination": {
@@ -204,42 +198,16 @@ After conversion, the document will be ingested via a structured processing pipe
             "operation": "digitization",
             "status": "in_progress",
             "submitted_at": "2026-01-10T10:00:00Z",
-            "total_pages": 343,
-            "total_tables": 57,
             "documents": [
                 {
                     "id": "c7b2ee21-ccc2-5d93-9865-7fcea2ea9623",
                     "name": "file1.pdf",
-                    "type": "digitization",
-                    "output_format": "md",
-                    "status": "completed",
-                    "message": "",
-                    "digitized_at": "2026-01-10T10:02:00Z",
-                    "timing_in_secs": {
-                        "digitizing": 120,
-                        "processing": null,
-                        "chunking": null,
-                        "indexing": null
-                    },
-                    "pages": 210,
-                    "tables": 10
+                    "status": "completed"
                 },
                 {
                     "id": "6083ecba-dd7e-572e-8cd5-5f950d96fa54",
                     "name": "file2.pdf",
-                    "type": "digitization",
-                    "output_format": "text",
-                    "status": "in_progress",
-                    "message": "",
-                    "digitized_at": null,
-                    "timing_in_secs": {
-                        "digitizing": 0,
-                        "processing": null,
-                        "chunking": null,
-                        "indexing": null
-                    },
-                    "pages": 0,
-                    "tables": 0
+                    "status": "in_progress"
                 }
             ],
             "error": ""
@@ -251,7 +219,7 @@ After conversion, the document will be ingested via a structured processing pipe
 ---
 
 ### GET /v1/documents/jobs/{job_id}
-- Returns status of job_id specified.
+- Returns detailed status of job_id specified.
 
 **Sample curl:**
 ```
@@ -274,41 +242,18 @@ After conversion, the document will be ingested via a structured processing pipe
     "operation": "digitization",
     "status": "in_progress",
     "submitted_at": "2026-01-10T10:00:00Z",
-    "total_pages": 343,
-    "total_tables": 57,
     "documents": [
         {
             "id": "c7b2ee21-ccc2-5d93-9865-7fcea2ea9623",
             "name": "file1.pdf",
             "type": "digitization",
             "output_format": "md",
-            "status": "completed",
-            "digitized_at": "2026-01-10T10:02:00Z",
-            "timing_in_secs": {
-                "digitizing": 120,
-                "processing": null,
-                "chunking": null,
-                "indexing": null
-            },
-            "pages": 210,
-            "tables": 10
+            "status": "completed"
         },
         {
             "id": "6083ecba-dd7e-572e-8cd5-5f950d96fa54",
             "name": "file2.pdf",
-            "type": "digitization",
-            "output_format": "md",
-            "status": "in_progress",
-            "message": "",
-            "digitized_at": null,
-            "timing_in_secs": {
-                "digitizing": 0,
-                "processing": null,
-                "chunking": null,
-                "indexing": null
-            },
-            "pages": 0,
-            "tables": 0
+            "status": "in_progress"
         }
     ],
     "error": ""
@@ -318,7 +263,7 @@ After conversion, the document will be ingested via a structured processing pipe
 ---
 
 ### GET /v1/documents
-- Returns all the documents processed(ingested/digitized) sorted by submitted_time.
+- Returns high level information of all the documents processed(ingested/digitized) sorted by submitted_time.
 
 **Query Params:**
 - limit  - int - Optional. Number of records to return per page. Default: 20.
@@ -352,52 +297,19 @@ After conversion, the document will be ingested via a structured processing pipe
             "id": "c7b2ee21-ccc2-5d93-9865-7fcea2ea9623",
             "name": "file1.pdf",
             "type": "digitization",
-            "output_format": "md",
-            "digitized_at": "2026-01-10T10:00:00Z",
-            "status": "completed",
-            "message": "",
-            "timing_in_secs": {
-                "digitizing": 120,
-                "processing": null,
-                "chunking": null,
-                "indexing": null
-            },
-            "pages": 210,
-            "tables": 10
+            "status": "completed"
         },
         {
             "id": "6083ecba-dd7e-572e-8cd5-5f950d96fa54",
             "name": "file2.pdf",
             "type": "digitization",
-            "output_format": "md",
-            "digitized_at": "2026-01-10T10:00:00Z",
-            "status": "in_progress",
-            "message": "",
-            "timing_in_secs": {
-                "digitizing": 0,
-                "processing": null,
-                "chunking": null,
-                "indexing": null
-            },
-            "pages": 0,
-            "tables": 0
+            "status": "in_progress"
         },
         {
             "id": "4365eifa-dd7e-8cd5-572e-5f950d96fa54",
             "name": "file2.pdf",
             "type": "ingestion",
-            "output_format": "json",
-            "digitized_at": "2026-01-10T10:00:00Z",
-            "status": "completed",
-            "message": "",
-            "timing_in_secs": {
-                "digitizing": 120,
-                "processing": 300,
-                "chunking": 10,
-                "indexing": null
-            },
-            "pages": 200,
-            "tables": 20
+            "status": "completed"
         }
     ]
 }
@@ -406,7 +318,10 @@ After conversion, the document will be ingested via a structured processing pipe
 ---
 
 ### GET /v1/documents/{id}
-- Returns specific document's information 
+- Returns details document's information of specified document id. 
+
+**Query Params:**
+- details - bool - Optional param. Enable this to get detailed information regarding the document like number of pages & tables, timings of ingestion stages.
 
 **Sample curl:**
 ```
@@ -427,10 +342,23 @@ After conversion, the document will be ingested via a structured processing pipe
     "id": "4365eifa-dd7e-8cd5-572e-5f950d96fa54",
     "name": "file2.pdf",
     "type": "ingestion",
+    "status": "completed",
     "output_format": "json",
     "digitized_at": "2026-01-10T10:00:00Z",
+    "error": ""
+}
+```
+
+**With details=true:**
+```
+{
+    "id": "4365eifa-dd7e-8cd5-572e-5f950d96fa54",
+    "name": "file2.pdf",
+    "type": "ingestion",
     "status": "completed",
-    "message": "",
+    "output_format": "json",
+    "digitized_at": "2026-01-10T10:00:00Z",
+    "error": "",
     "timing_in_secs": {
         "digitizing": 120,
         "processing": 300,
@@ -504,7 +432,7 @@ After conversion, the document will be ingested via a structured processing pipe
 **Sample curl:**
 ```
 > curl -X DELETE\ 
-  'http://localhost:4000/v1/documents?confirm=True
+  'http://localhost:4000/v1/documents?confirm=true
 >  
 ```
 **Response codes:**
@@ -516,10 +444,3 @@ After conversion, the document will be ingested via a structured processing pipe
 | **500 Internal Error** | Server Failure | Failure occurred during VDB truncation or recursive file deletion. |
 
 ---
-
-### Assumptions:
-- Digitize documents pod/container mounted with a Read/Write persistent volume and data persists over restarts to store cached results
-- In case of multiple replicas, same volume should be shared to maintain the ingestion job status
-- During ingestion
-    - User should pass files with unique names
-    - In case user pass same file again, vdb will be upserted
