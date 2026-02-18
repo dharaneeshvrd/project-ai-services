@@ -396,7 +396,7 @@ After conversion, the document will be ingested via a structured processing pipe
 **Sample response:**
 ```
 {
-    "result": ... // Based on output_format request, result will contain str in case of md/text, dict in case of json output format.
+    "result": ... // Based on output_format request, result will contain str in case of md/text, dict in case of json output format, sample json file can be found [here](https://github.com/docling-project/docling-core/blob/5a7e567323fe250fa0b0211f92d8931e0ae64740/examples/2408.09869v3.json)
 }
 ```
 ---
