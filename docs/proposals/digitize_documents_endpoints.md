@@ -59,34 +59,34 @@ After conversion, the document will be ingested via a structured processing pipe
 **Description:**
 - User can pass one or more pdfs directly as a byte stream with the optional query params.
 - API Server should do following
-- Validate params to identiy whether its a digitization or ingestion operation.
+- Validate params to identify whether its a digitization or ingestion operation.
 
 - **In case of ingestion:**
-    - Validate no `LOCK` file exist to ensure there is no existing process in progress.
+    - Validate no `LOCK` file exist to ensure there is no existing ingestion in progress.
     - Create `LOCK` file in `/var/lib/ai-services/applications/<app-name>/cache/`.
     - Start the ingestion in a background process.
     - Generate a UUID as job_id.
     - End the request with returning job_id as response and 202 Accepted status.
 
-    - Background ingestion process should do following in common
+    - Background ingestion process should do following
         - Start the process pipeline.
         - Atomically write status into `<job_id>_status.json` from main process to avoid race issues.
         - Once done with ingestion, should remove the `LOCK` file and conclude the job.
         - Keep `<job_id>_status.json` for preserving the history.
 
 - **In case of digitization**
-- API Server would initiate a queue(max_size=10) and start a background thread that look for elements in the queue.
-- Whenever a new reuqest received, API server would do following
-    - Check queue is not full, if it is full reject the request with 429.
-    - Do validation on the files submitted to avoid over loading server and starve the subseqent requests
-        - Number files should not exceed 4 in a batch
-        - Number of pages should not exceed 500
-    - Generate a UUID as `job_id` to identify the digitization task.
-    - Write the pdfs in a staging directory `/var/lib/ai-services/applications/<app-name>/cache/staging/<job_id>`
-    - Add the digitization task into the queue.
-- When background thread reads the task from the queue it submits the digitization request to a background process pool.
-- Once all the documents are digitized in a particular task, background thread would update the status, cleanup the staging content, enqueue the next task and process it.
-- *Note:* Digitization tasks run in an isolated worker pool and are not shared with the Ingestion worker pools.
+    - API Server would initiate a queue(max_size=10) and start a background thread that look for elements in the queue.
+    - Whenever a new reuqest received, API server would do following
+        - Check queue is not full, if it is full reject the request with 429.
+        - Do validation on the files submitted to avoid over loading server and starve the subsequent requests
+            - Number files should not exceed 4 in a request
+            - Number of pages should not exceed 500
+        - Generate a UUID as `job_id` to identify the digitization task.
+        - Write the pdfs in a staging directory `/var/lib/ai-services/applications/<app-name>/cache/staging/<job_id>`
+        - Add the digitization task into the queue.
+    - When background thread reads the task from the queue it submits the digitization request to a background process pool.
+    - Once all the documents are digitized in a particular task, background thread would update the status, cleanup the staging content, enqueue the next task and process it.
+    - *Note:* Digitization tasks run in an isolated worker pool and are not shared with the Ingestion worker pools.
 
 **Sample curl for ingestion:**
 ```
@@ -99,7 +99,7 @@ After conversion, the document will be ingested via a structured processing pipe
 **Sample curl for digitization:**
 ```
 > curl -X 'POST' \ 
-  'http://localhost:4000/v1/documents?digitize_only=True&output_format=md' \
+  'http://localhost:4000/v1/documents?operation=digitization&output_format=md' \
   -F 'files=@/path/to/file3.pdf'
   -F 'files=@/path/to/file4.pdf'
 > 
@@ -126,7 +126,7 @@ After conversion, the document will be ingested via a structured processing pipe
 
 **Note:**
 - `output_format` passed will be ignored in case of ingestion, .
-- Users can submit digitized documents for ingestion; if the file hasn't been cleared, the pipeline will use its cached version.
+- Users can submit digitized documents for ingestion; if the file is not cleaned using DELETE, the pipeline will use its cached version.
 
 ---
 
@@ -314,7 +314,7 @@ After conversion, the document will be ingested via a structured processing pipe
 ---
 
 ### GET /v1/documents
-- Returns all the pdf documents processed(ingested/digitized) sorted by submitted_time.
+- Returns all the documents processed(ingested/digitized) sorted by submitted_time.
 
 **Query Params:**
 - limit  - int - Optional. Number of records to return per page. Default: 20.
@@ -445,7 +445,7 @@ After conversion, the document will be ingested via a structured processing pipe
 **Sample curl:**
 ```
 > curl \ 
-  'http://localhost:4000/v1/documents/6083ecba-dd7e-572e-8cd5-5f950d96fa54
+  'http://localhost:4000/v1/documents/6083ecba-dd7e-572e-8cd5-5f950d96fa54/content
 >  
 ```
 
