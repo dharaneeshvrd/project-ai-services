@@ -49,23 +49,14 @@ def ingest(directory_path):
     out_path = setup_cache_dir(index_name)
 
     start_time = time.time()
-    combined_chunks, converted_pdf_stats = process_documents(
-        input_file_paths, out_path, llm_model_dict['llm_model'], llm_model_dict['llm_endpoint'],  emb_model_dict["emb_endpoint"],
+    embedder = get_embedder(emb_model_dict["emb_model"], emb_model_dict["emb_endpoint"], emb_model_dict["max_tokens"])
+    converted_pdf_stats = process_documents(
+        input_file_paths, out_path, llm_model_dict['llm_model'], llm_model_dict['llm_endpoint'],  embedder, vector_store,
         max_tokens=emb_model_dict['max_tokens'] - 100)
     # converted_pdf_stats holds { file_name: {page_count: int, table_count: int, timings: {conversion: time_in_secs, process_text: time_in_secs, process_tables: time_in_secs, chunking: time_in_secs}} }
-    if converted_pdf_stats is None or combined_chunks is None:
+    if converted_pdf_stats is None:
         ingestion_failed()
         return
-
-    if combined_chunks:
-        logger.info("Loading processed documents into DB")
-        embedder = get_embedder(emb_model_dict['emb_model'], emb_model_dict['emb_endpoint'], emb_model_dict['max_tokens'])
-        # Insert data into Opensearch
-        vector_store.insert_chunks(
-            combined_chunks,
-            embedder=embedder
-        )
-        logger.info("Processed documents loaded into DB")
 
     # Log time taken for the file
     end_time = time.time()  # End the timer for the current file

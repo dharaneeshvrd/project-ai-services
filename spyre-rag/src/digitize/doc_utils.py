@@ -163,7 +163,7 @@ def process_table(converted_doc, pdf_path, out_path, gen_model, gen_endpoint):
 
     return table_count, process_time
 
-def process_converted_document(converted_json_path, pdf_path, out_path, conversion_stats, gen_model, gen_endpoint, emb_endpoint, max_tokens):    
+def process_converted_document(converted_json_path, pdf_path, out_path, conversion_stats, gen_model, gen_endpoint):    
     stem = Path(pdf_path).stem
     processed_text_json_path = (Path(out_path) / f"{stem}{text_suffix}")
     processed_table_json_path = (Path(out_path) / f"{stem}{table_suffix}")
@@ -221,7 +221,7 @@ def convert_document(pdf_path, conversion_stats, out_path):
         logger.error(f"Error converting '{pdf_path}': {e}")
     return None, None, None
 
-def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoint, max_tokens):
+def process_documents(input_paths, out_path, llm_model, llm_endpoint, embedder, vector_store, max_tokens):
     # Skip files that already exist by matching the cached checksum of the pdf
     # if there is no difference in checksum and processed text & table json also exist, would skip for convert and process list
     # if checksum is matching but either processed text or table json not exist, process the file, but don't convert
@@ -270,15 +270,15 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
 
     def _run_batch(batch_paths, convert_worker, max_worker):
         batch_stats = {}
-        batch_chunk_paths = []
-        batch_table_paths = []
+        batch_table_paths: dict[Any, Any] = {}
         
         if not batch_paths:
-            return batch_stats, batch_chunk_paths, batch_table_paths
+            return batch_stats
 
         with ProcessPoolExecutor(max_workers=convert_worker) as converter_executor, \
              ThreadPoolExecutor(max_workers=max_worker) as processor_executor, \
-             ThreadPoolExecutor(max_workers=max_worker) as chunker_executor:
+             ThreadPoolExecutor(max_workers=max_worker) as chunker_executor, \
+             ThreadPoolExecutor(max_workers=max_worker) as index_executor:
 
             # A. Submit Conversions
             conversion_futures = [
@@ -288,6 +288,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
             
             process_futures = []
             chunk_futures = []
+            index_futures = []
 
             # B. Handle Conversions -> Submit Processing
             for conversion_future in as_completed(conversion_futures):
@@ -305,7 +306,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
 
                 process_future = processor_executor.submit(
                     process_converted_document, converted_json, path, out_path, batch_paths[path], 
-                    llm_model, llm_endpoint, emb_endpoint, max_tokens
+                    llm_model, llm_endpoint
                 )
                 process_futures.append(process_future)
 
@@ -323,10 +324,10 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                 batch_stats[path]["timings"].update(timings)
                 batch_stats[path]["page_count"] = page_count
                 batch_stats[path]["table_count"] = table_count
-                batch_table_paths.append(processed_table_json_path)
+                batch_table_paths[path] = processed_table_json_path
 
                 chunk_future = chunker_executor.submit(
-                    chunk_single_file, processed_text_json_path, path, out_path, batch_paths[path], emb_endpoint, max_tokens
+                    chunk_single_file, processed_text_json_path, path, out_path, batch_paths[path], embedder.emb_endpoint, max_tokens
                 )
                 chunk_futures.append(chunk_future)
 
@@ -338,17 +339,30 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                 except Exception as e:
                     logger.error(f"Error from chunking: {e}")
                     continue
+                if not processed_chunk_json_path:
+                    continue
 
-                if processed_chunk_json_path:
-                    batch_chunk_paths.append(processed_chunk_json_path)
-                    logger.info(f"Completed '{path}'")
+                chunks= create_chunk_documents(processed_chunk_json_path, batch_table_paths[path], path)
+                index_future = index_executor.submit(
+                    vector_store.insert_chunks, chunks, path, vectors=None, embedder=embedder
+                )
+                index_futures.append(index_future)
 
-        return batch_stats, batch_chunk_paths, batch_table_paths
+            for index_future in as_completed(index_futures):
+                try:
+                    path, index_time = index_future.result()
+                except Exception as e:
+                    logger.error("Error from indexing: {e}")
+                    continue
+
+                batch_stats[path]["timings"]["indexing"] = index_time
+
+        return batch_stats
 
     try:
         # Light files can be processed in parallel with worker_size
         worker_size = min(WORKER_SIZE, len(light_files))
-        l_stats, l_chunks, l_tables = _run_batch(
+        l_stats = _run_batch(
             light_files,
             convert_worker=worker_size,
             max_worker=worker_size,
@@ -356,34 +370,17 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
 
         worker_size = min(WORKER_SIZE, len(heavy_files))
         convert_worker_size = min(HEAVY_PDF_CONVERT_WORKER_SIZE, len(heavy_files))
-        h_stats, h_chunks, h_tables = _run_batch(
+        h_stats = _run_batch(
             heavy_files,
             convert_worker=convert_worker_size, # Heavy files conversion should happen with less workers compared to light files conversion
             max_worker=worker_size, # Other processing steps can be parallelized with more workers as they are not CPU intensive
         )
+        stats = {**l_stats,  **h_stats}
 
-        # Combine stats from both batches
-        converted_pdf_stats = {**l_stats, **h_stats}
-        all_chunk_json_paths = l_chunks + h_chunks
-        all_table_json_paths = l_tables + h_tables
-
-        combined_chunks = []
-        succeeded_files = {**l_stats, **h_stats}.keys()
-        
-        for path in succeeded_files:
-            stem = Path(path).stem
-            c_path = Path(out_path) / f"{stem}{chunk_suffix}"
-            t_path = Path(out_path) / f"{stem}{table_suffix}"
-            
-            if c_path in all_chunk_json_paths and t_path in all_table_json_paths:
-                filtered_chunks = create_chunk_documents(c_path, t_path, path)
-                combined_chunks.extend(filtered_chunks)
-
-        return combined_chunks, converted_pdf_stats
-
+        return stats
     except Exception as e:
         logger.error(f"Pipeline Error: {e}")
-        return None, None
+        return None
 
 def collect_header_font_sizes(elements):
     """

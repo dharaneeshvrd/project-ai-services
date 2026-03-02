@@ -1,6 +1,7 @@
 from glob import glob
 import os
 import shutil
+import time
 import numpy as np
 import hashlib
 from tqdm import tqdm
@@ -111,16 +112,17 @@ class OpensearchVectorStore(VectorStore):
         # Create the Index
         self.client.indices.create(index=self.index_name, body=index_body)
 
-    def insert_chunks(self, chunks, vectors=None, embedder=None, batch_size=10):
+    def insert_chunks(self, chunks, path, vectors=None, embedder=None, batch_size=10):
         """
         Supports 2 modes of insertion
         1. Pure embedding: pass 'chunks' and 'vectors'
         2. Text chunks: pass 'chunks' and 'embedder' (class instance)
         """
 
+        process_start_time = time.time() 
         if not chunks:
             logger.debug("Nothing to chunk!")
-            return
+            return path, None
 
         # Handle Pre-computed Vectors if provided
         if vectors is not None:
@@ -178,7 +180,7 @@ class OpensearchVectorStore(VectorStore):
             logger.debug(f"Successfully indexed {success} chunks. Failed: {failed}")
 
         logger.debug(f"Inserted the {len(chunks)} into index.")
-
+        return path, time.time() - process_start_time
 
     def search(self, query, vector=None, embedder=None, top_k=5, mode="hybrid", language='en'):
         """
