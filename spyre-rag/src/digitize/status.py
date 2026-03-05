@@ -51,7 +51,7 @@ def create_document_metadata(
     job_id: str,
     operation: str,
     submitted_at: str,
-    docs_dir: str = config.DOCS_DIR
+    docs_dir: Path = config.DOCS_DIR
 ) -> DocumentMetadata:
     """
     Create and persist a single document metadata file.
@@ -90,7 +90,7 @@ def create_job_state(
     submitted_at: str,
     doc_id_dict: dict[str, str],
     documents_info: list[str],
-    jobs_dir: str = config.JOBS_DIR
+    jobs_dir: Path = config.JOBS_DIR
 ) -> JobState:
     """
     Create and persist the job state file.
@@ -176,7 +176,7 @@ class StatusManager:
     """Thread-safe handler for updating Job and Document status files with synchronous writes"""
     def __init__(self, job_id: str):
         self.job_id = job_id
-        self.job_status_file = Path(config.CACHE_DIR) / "jobs" / f"{job_id}_status.json"
+        self.job_status_file = config.JOBS_DIR / f"{job_id}_status.json"
         self._job_lock = threading.Lock()
         self._doc_locks: dict[str, threading.Lock] = {}
         self._doc_locks_lock = threading.Lock()
@@ -290,7 +290,7 @@ class StatusManager:
         """
         doc_lock = self._get_doc_lock(doc_id)
         with doc_lock:
-            meta_file = Path(config.CACHE_DIR) / "docs" / f"{doc_id}_metadata.json"
+            meta_file = config.DOCS_DIR / f"{doc_id}_metadata.json"
 
             if not self._validate_file_exists(meta_file, f"metadata file {doc_id}_metadata.json"):
                 return

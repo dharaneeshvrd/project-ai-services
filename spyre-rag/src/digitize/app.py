@@ -12,6 +12,7 @@ from common.misc_utils import get_logger, set_log_level, has_allowed_extension
 import digitize.digitize_utils as dg_util
 from digitize import types
 from digitize.errors import *
+from digitize.config import *
 
 log_level = logging.INFO
 level = os.getenv("LOG_LEVEL", "").removeprefix("--").lower()
@@ -31,11 +32,6 @@ digitization_semaphore = asyncio.BoundedSemaphore(2)
 ingestion_semaphore = asyncio.BoundedSemaphore(1)
 
 logger = get_logger("digitize_server")
-
-CACHE_DIR = "/var/cache"
-DOCS_DIR = f"{CACHE_DIR}/docs"
-STAGING_DIR = f"{CACHE_DIR}/staging"
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -64,7 +60,7 @@ async def digitize_documents(job_id: str, filenames: List[str], output_format: t
 
 async def ingest_documents(job_id: str, filenames: List[str], doc_id_dict: dict):
     status_mgr = StatusManager(job_id)
-    job_staging_path = Path(STAGING_DIR) / f"{job_id}"
+    job_staging_path = STAGING_DIR / f"{job_id}"
 
     try:
         logger.info(f"🚀 Ingestion started for job: {job_id}")
@@ -156,7 +152,7 @@ async def digitize_document(
             if operation == types.OperationType.INGESTION:
                 # Upload the file byte stream to files in staging directory
                 # files are written to disk here before creating background task to avoid OOM crashes in the thread. Useful for retrying the ingestion if background task crashes
-                await dg_util.stage_upload_files(job_id, filenames, str(Path(STAGING_DIR) / job_id), file_contents)
+                await dg_util.stage_upload_files(job_id, filenames, str(STAGING_DIR / job_id), file_contents)
 
                 doc_id_dict = dg_util.initialize_job_state(job_id, types.OperationType.INGESTION, filenames)
 

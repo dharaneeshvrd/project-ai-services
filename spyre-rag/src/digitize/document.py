@@ -55,7 +55,7 @@ class DocumentMetadata:
             "metadata": self.metadata,
         }
 
-    def save(self, docs_dir: str = DOCS_DIR) -> Path:
+    def save(self, docs_dir: Path = DOCS_DIR) -> Path:
         """
         Persist the document metadata as <doc_id>_metadata.json.
 
@@ -65,8 +65,8 @@ class DocumentMetadata:
         Returns:
             Path to the written metadata file.
         """
-        Path(docs_dir).mkdir(parents=True, exist_ok=True)
-        meta_path = Path(docs_dir) / f"{self.id}_metadata.json"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = docs_dir / f"{self.id}_metadata.json"
         with open(meta_path, "w") as f:
             json.dump(self.to_dict(), f, indent=4)
         return meta_path

@@ -3,12 +3,13 @@ Configuration settings for document processing.
 These values can be overridden via environment variables.
 """
 import os
-from typing import LiteralString
+from pathlib import Path
 
 # Directory paths
-CACHE_DIR = "/var/cache"
-DOCS_DIR: LiteralString = f"{CACHE_DIR}/docs"
-JOBS_DIR = f"{CACHE_DIR}/jobs"
+CACHE_DIR = Path("/var/cache")
+DOCS_DIR = CACHE_DIR / "docs"
+JOBS_DIR = CACHE_DIR / "jobs"
+STAGING_DIR = CACHE_DIR / "staging"
 
 # Worker pool sizes
 WORKER_SIZE = int(os.getenv("DOC_WORKER_SIZE", "4"))
