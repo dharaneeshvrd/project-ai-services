@@ -242,7 +242,12 @@ class StatusManager:
         status_counts = Counter(doc.get("status") for doc in data["documents"])
         data["stats"]["completed"] = status_counts[DocStatus.COMPLETED.value]
         data["stats"]["failed"] = status_counts[DocStatus.FAILED.value]
-        data["stats"]["in_progress"] = status_counts[DocStatus.IN_PROGRESS.value, DocStatus.DIGITIZED.value, DocStatus.PROCESSED.value, DocStatus.CHUNKED.value]
+        data["stats"]["in_progress"] = (
+            status_counts[DocStatus.IN_PROGRESS.value] +
+            status_counts[DocStatus.DIGITIZED.value] +
+            status_counts[DocStatus.PROCESSED.value] +
+            status_counts[DocStatus.CHUNKED.value]
+        )
 
     @staticmethod
     def _extract_value(v: Any) -> Any:
