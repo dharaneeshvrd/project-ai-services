@@ -1,13 +1,10 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import LiteralString, Optional
+from typing import Optional
 
+from digitize.config import DOCS_DIR
 from digitize.types import DocStatus, OutputFormat
-
-
-CACHE_DIR = "/var/cache"
-DOCS_DIR: LiteralString = f"{CACHE_DIR}/docs"
 
 @dataclass
 class TimingInfo:
