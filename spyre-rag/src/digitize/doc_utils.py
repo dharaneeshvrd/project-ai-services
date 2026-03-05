@@ -297,7 +297,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                     logger.debug(f"Conversion Done: updating doc & job metadata for document: {doc_id}")
                     status_mgr.update_doc_metadata(doc_id, {
                         "status": DocStatus.DIGITIZED,
-                        "timing_in_secs": {"digitizing": round(float(conv_time or 0), 2)}
+                        "timing_in_secs": {**batch_stats[str(path)]["timings"]}
                     })
                     status_mgr.update_job_progress(doc_id, DocStatus.DIGITIZED, JobStatus.IN_PROGRESS)
 
@@ -329,17 +329,17 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                     total_processing_time = timings["process_text"] + timings["process_tables"]
                     batch_stats[str(path)].update({
                         "page_count": pgs,
-                        "table_count": tabs,
-                        "timings": {**batch_stats[str(path)]["timings"], **{"processing": round(float(total_processing_time or 0), 2)}}
+                        "table_count": tabs
                     })
+                    batch_stats["timings"]["processing"] = round(float(total_processing_time or 0), 2)
                     batch_table_paths.append(tab_json)
+                   
                     logger.debug(f"Processing Done: updating doc & job metadata for document: {doc_id}")
-
                     status_mgr.update_doc_metadata(doc_id, {
                         "status": DocStatus.PROCESSED,
                         "pages": pgs,
                         "tables": tabs,
-                        "timing_in_secs": {**batch_stats[str(path)]["timings"], **{"processing": round(float(total_processing_time or 0), 2)}}
+                        "timing_in_secs": {**batch_stats[str(path)]["timings"]}
                     })
                     status_mgr.update_job_progress(
                         doc_id=doc_id,
@@ -377,12 +377,13 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                     # Capture chunk counts in real time and update <doc_id>_metadata.json
                     chunk_count = count_chunks(chunk_json, tab_json)
                     batch_stats[str(path)]["chunk_count"] = chunk_count
+                    batch_stats["timings"]["chunking"] = round(float(chunk_time or 0), 2)
 
                     logger.debug(f"Chunking Done: updating doc metadata for document: {doc_id}")
                     status_mgr.update_doc_metadata(doc_id, {
                         "status": DocStatus.CHUNKED,
                         "chunks": chunk_count,
-                        "timing_in_secs": {**batch_stats[str(path)]["timings"], **{"chunking": round(float(chunk_time or 0), 2)}}
+                        "timing_in_secs": {**batch_stats[str(path)]["timings"]}
                     })
                     logger.debug(f"Chunking Done: updating job status for document: {doc_id}")
                     status_mgr.update_job_progress(doc_id, DocStatus.CHUNKED, JobStatus.IN_PROGRESS)
