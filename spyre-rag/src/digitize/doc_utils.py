@@ -266,7 +266,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
             for path in batch_paths:
                 doc_id = doc_id_dict.get(Path(path).name)
                 if doc_id is None:
-                    logger.error(f"Document {path} not found in doc_id_dict")
+                    logger.debug(f"Document {path} not found in doc_id_dict")
                     continue
 
                 future = converter_executor.submit(convert_document, path, out_path, doc_id)
