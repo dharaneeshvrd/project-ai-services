@@ -83,7 +83,7 @@ class OpensearchVectorStore(VectorStore):
         logger.debug(f"Setting up index {self.index_name} with dimension {dim}")
 
         if self.client.indices.exists(index=self.index_name):
-            logger.info(f"Index {self.index_name} already present in vectorstore")
+            logger.debug(f"Index {self.index_name} already present in vectorstore")
             return
 
         logger.debug(f"Creating new index {self.index_name}")
