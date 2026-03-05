@@ -326,14 +326,14 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                         batch_stats.pop(str(path), {})
                         continue
 
+                    total_processing_time = timings["process_text"] + timings["process_tables"]
                     batch_stats[str(path)].update({
                         "page_count": pgs,
                         "table_count": tabs,
-                        "timings": {**batch_stats[str(path)]["timings"], **timings}
+                        "timings": {**batch_stats[str(path)]["timings"], **{"processing": round(float(total_processing_time or 0), 2)}}
                     })
                     batch_table_paths.append(tab_json)
                     logger.debug(f"Processing Done: updating doc & job metadata for document: {doc_id}")
-                    total_processing_time = timings["process_text"] + timings["process_tables"]
 
                     status_mgr.update_doc_metadata(doc_id, {
                         "status": DocStatus.PROCESSED,
