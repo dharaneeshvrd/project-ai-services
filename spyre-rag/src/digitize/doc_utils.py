@@ -3,10 +3,8 @@ import time
 import logging
 import os
 import shutil
-from tkinter import NO
 from typing import Any
 
-from regex import F
 from tqdm import tqdm
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -313,7 +311,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                     process_futures[p_future] = str(path)
                 except Exception as e:
                     logger.error(f"Error from conversion for {path}: {str(e)}", exc_info=True)
-                    batch_stats.pop(str(path), {})
+                    batch_stats.pop(path, {})
                     if doc_id is not None:
                         status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=f"failed to convert document: {str(e)}")
                         status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.FAILED, error=f"failed to convert document: {str(e)}")
@@ -330,7 +328,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                             logger.error(f"Processing failed for {path}: txt_json or tab_json is None")
                             status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=f"Failed to process document {doc_id}: processing returned None")
                             status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.FAILED, error=f"Failed to extract text and tables from document {doc_id}: processing returned None")
-                        batch_stats.pop(str(path), {})
+                        batch_stats.pop(path, {})
                         continue
 
                     total_processing_time = timings["process_text"] + timings["process_tables"]
@@ -338,7 +336,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                         "page_count": pgs,
                         "table_count": tabs
                     })
-                    batch_stats["timings"]["processing"] = round(float(total_processing_time or 0), 2)
+                    batch_stats[path]["timings"]["processing"] = round(float(total_processing_time or 0), 2)
                     batch_table_paths.append(tab_json)
                    
                     if doc_id is not None:
@@ -365,7 +363,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                         logger.error(f"Error from processing for {path}: {str(e)}", exc_info=True)
                         status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=f"failed to process document: {str(e)}")
                         status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.FAILED, error=f"failed to extract text and tables from document: {str(e)}")
-                    batch_stats.pop(str(path), {})
+                    batch_stats.pop(path, {})
 
             # D. Handle Chunking
             for fut in as_completed(chunk_futures):
@@ -379,7 +377,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                             logger.error(f"Chunking failed for {path}: chunk_json is None")
                             status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=f"failed to chunk document {doc_id}: chunk_json returned is None")
                             status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.FAILED, error=f"failed to chunk document {doc_id}: chunk_json returned is None")
-                        batch_stats.pop(str(path), {})
+                        batch_stats.pop(path, {})
                         continue
 
                     batch_stats[path]["timings"]["chunking"] = round(float(chunk_time or 0), 2)
@@ -387,7 +385,6 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                     # Capture chunk counts in real time and update <doc_id>_metadata.json
                     chunk_count = count_chunks(chunk_json, tab_json)
                     batch_stats[path]["chunk_count"] = chunk_count
-                    batch_stats["timings"]["chunking"] = round(float(chunk_time or 0), 2)
 
                     if doc_id is not None:
                         logger.debug(f"Chunking Done: updating doc & job metadata for document: {doc_id}")
@@ -402,7 +399,7 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
                         logger.error(f"Error from chunking for {path}: {str(e)}", exc_info=True)
                         status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=f"failed to chunk document: {str(e)}")
                         status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.FAILED, error=f"failed to chunk document: {str(e)}")
-                    batch_stats.pop(str(path), {})
+                    batch_stats.pop(path, {})
 
         return batch_stats, batch_chunk_paths, batch_table_paths
 
@@ -625,11 +622,7 @@ def chunk_single_file(input_path, pdf_path, out_path, emb_endpoint, max_tokens=5
             for idx, block in enumerate(tqdm_wrapper(data, desc=f"Chunking {input_path}")):
                 label = block.get("label")
                 text = block.get("text", "").strip()
-                try:
-                    page_no = block.get("prov", {})[0].get("page_no")
-                except (KeyError, IndexError, TypeError) as e:
-                    logger.debug(f"Could not extract page_no from block {idx}: {e}")
-                    page_no = 0
+                page_no = block.get("page", 0)
                 ref = f"#texts/{idx}"
 
                 if label == "section_header":

@@ -5,7 +5,7 @@ import common.db_utils as db
 from common.emb_utils import get_embedder
 from common.misc_utils import *
 from digitize.doc_utils import process_documents
-from digitize.status import StatusManager
+from digitize.status import StatusManager, get_utc_timestamp
 from digitize.types import JobStatus, DocStatus
 
 logger = get_logger("ingest")
@@ -85,8 +85,8 @@ def ingest(directory_path, job_id=None, doc_id_dict=None):
                     doc_id = doc_id_dict.get(Path(path).name)
                     if doc_id:
                         logger.debug(f"Indexing Done: updating doc & job metadata to COMPLETED for document: {doc_id}")
-                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.COMPLETED})
-                        status_mgr.update_job_progress(doc_id, DocStatus.COMPLETED, JobStatus.IN_PROGRESS)
+                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.COMPLETED, "completed_at": get_utc_timestamp()})
+                        status_mgr.update_job_progress(doc_id, DocStatus.COMPLETED, JobStatus.COMPLETED)
 
         # Log time taken for the file
         end_time = time.time()  # End the timer for the current file

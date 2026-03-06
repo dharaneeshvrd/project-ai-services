@@ -181,9 +181,6 @@ class StatusManager:
         self._doc_locks: dict[str, threading.Lock] = {}
         self._doc_locks_lock = threading.Lock()
 
-    def _get_timestamp(self):
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
     def _get_doc_lock(self, doc_id: str) -> threading.Lock:
         """Get or create a lock for a specific document."""
         with self._doc_locks_lock:
@@ -218,9 +215,8 @@ class StatusManager:
         data["status"] = job_status.value
         
         if job_status in [JobStatus.COMPLETED, JobStatus.FAILED]:
-            if "completed_at" not in data:
-                data["completed_at"] = self._get_timestamp()
-        
+            data["completed_at"] = get_utc_timestamp()
+
         if error and job_status == JobStatus.FAILED:
             data["error"] = str(error)
 
