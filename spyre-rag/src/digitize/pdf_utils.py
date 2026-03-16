@@ -143,11 +143,13 @@ def get_doc_converter():
     import os
     from pathlib import Path
     from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.datamodel.pipeline_options import ThreadedPdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.backend.pypdfium2_backend import PyPdfiumPageBackend
+    from docling.datamodel.accelerator_options import AcceleratorOptions
 
-    # Accelerator & pipeline options
-    pipeline_options = PdfPipelineOptions()
+    # Pipeline options
+    pipeline_options = ThreadedPdfPipelineOptions()
     
     # Only set artifacts_path if DOCLING_MODELS_PATH environment variable is set
     docling_models_path = os.environ.get('DOCLING_MODELS_PATH')
@@ -160,7 +162,11 @@ def get_doc_converter():
             logger.warning(f"DOCLING_MODELS_PATH set to {artifacts_path} but directory does not exist")
     else:
         logger.debug("DOCLING_MODELS_PATH not set. Docling will use default model loading behavior.")
-    
+    pipeline_options.accelerator_options = AcceleratorOptions(num_threads=8)
+    pipeline_options.ocr_batch_size = 8
+    pipeline_options.table_batch_size = 8
+    pipeline_options.layout_batch_size = 8
+
     pipeline_options.do_table_structure = True
     pipeline_options.table_structure_options.do_cell_matching = True
     pipeline_options.do_ocr = False
@@ -169,7 +175,12 @@ def get_doc_converter():
         allowed_formats=[
             InputFormat.PDF
         ],
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=pipeline_options,
+                backend=PyPdfiumPageBackend  # type: ignore[arg-type]
+            )
+        },
     )
 
     return doc_converter
