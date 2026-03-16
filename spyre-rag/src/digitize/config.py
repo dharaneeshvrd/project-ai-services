@@ -14,7 +14,7 @@ DIGITIZED_DOCS_DIR = CACHE_DIR / "digitized"
 
 # Worker pool sizes
 WORKER_SIZE = int(os.getenv("DOC_WORKER_SIZE", "4"))
-HEAVY_PDF_CONVERT_WORKER_SIZE = int(os.getenv("HEAVY_PDF_CONVERT_WORKER_SIZE", "2"))
+HEAVY_PDF_CONVERT_WORKER_SIZE = int(os.getenv("HEAVY_PDF_CONVERT_WORKER_SIZE", "1"))
 HEAVY_PDF_PAGE_THRESHOLD = int(os.getenv("HEAVY_PDF_PAGE_THRESHOLD", "500"))
 
 # LLM connection pool size

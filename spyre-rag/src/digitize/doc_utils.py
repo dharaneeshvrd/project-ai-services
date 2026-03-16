@@ -20,8 +20,6 @@ from digitize.status import StatusManager
 from digitize.types import DocStatus, JobStatus, OutputFormat
 import digitize.config as config
 
-logging.getLogger('docling').setLevel(logging.CRITICAL)
-
 logger = get_logger("doc_utils")
 
 # Load configuration from config module
@@ -32,6 +30,11 @@ POOL_SIZE = config.LLM_POOL_SIZE
 
 is_debug = logger.isEnabledFor(logging.DEBUG)
 tqdm_wrapper = tqdm if is_debug else (lambda x, **kwargs: x)
+
+if is_debug:
+    logging.getLogger('docling').setLevel(logging.DEBUG)
+else:
+    logging.getLogger('docling').setLevel(logging.CRITICAL)
 
 excluded_labels = {
     'page_header', 'page_footer', 'caption', 'reference', 'footnote'
