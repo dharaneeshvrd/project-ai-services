@@ -501,7 +501,10 @@ def get_header_level(text, font_size, sorted_font_sizes):
 
 
 def count_tokens(text, emb_endpoint):
-    token_len = len(tokenize_with_llm(text, emb_endpoint))
+    tokens = tokenize_with_llm(text, emb_endpoint)
+    if tokens is None:
+        return 0
+    token_len = len(tokens)
     return token_len
 
 def split_text_into_token_chunks(text, emb_endpoint, max_tokens=512, overlap=50):

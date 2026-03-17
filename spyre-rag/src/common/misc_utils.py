@@ -1,11 +1,70 @@
 import hashlib
 import logging
 import os
+import time
 from contextvars import ContextVar
+from functools import wraps
+from typing import Callable, TypeVar, Any
 from digitize.config import DIGITIZED_DOCS_DIR
+
+T = TypeVar('T')
 
 # ContextVar to store the request ID for each request
 request_id_ctx = ContextVar("request_id", default="-")
+
+def retry_with_exponential_backoff(
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+    backoff_factor: float = 2.0,
+    logger_name: str = "retry"
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """
+    Decorator that retries a function with exponential backoff on exceptions.
+    
+    Args:
+        max_retries: Maximum number of retry attempts (default: 3)
+        initial_delay: Initial delay in seconds before first retry (default: 1.0)
+        backoff_factor: Multiplier for delay between retries (default: 2.0)
+        logger_name: Name for the logger instance (default: "retry")
+    
+    Returns:
+        Decorated function that retries on exceptions
+    
+    Example:
+        @retry_with_exponential_backoff(max_retries=3, initial_delay=1.0)
+        def api_call():
+            return requests.get("https://api.example.com")
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            retry_logger = get_logger(logger_name)
+            last_exception: Exception | None = None
+            
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    
+                    if attempt < max_retries - 1:
+                        delay = initial_delay * (backoff_factor ** attempt)
+                        retry_logger.warning(
+                            f"Error in {func.__name__} (attempt {attempt + 1}/{max_retries}): {str(e)}. "
+                            f"Retrying in {delay}s..."
+                        )
+                        time.sleep(delay)
+                    else:
+                        retry_logger.error(
+                            f"Error in {func.__name__} after {max_retries} attempts: {str(e)}"
+                        )
+            
+            # If all retries failed, raise the last exception
+            # This should always be set if we reach here, but we check to satisfy type checker
+            raise last_exception if last_exception else RuntimeError(f"{func.__name__} failed without exception")
+            
+        return wrapper
+    return decorator
 
 class RequestIDFilter(logging.Filter):
     #Filter to inject request_id from ContextVar into log records.
