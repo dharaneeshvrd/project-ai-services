@@ -13,8 +13,8 @@ from docling_core.types.doc.document import DoclingDocument
 from concurrent.futures import as_completed, ProcessPoolExecutor, ThreadPoolExecutor
 from sentence_splitter import SentenceSplitter
 
-from common.llm_utils import create_llm_session, summarize_and_classify_tables, tokenize_with_llm
-from common.misc_utils import get_logger, text_suffix, table_suffix, chunk_suffix
+from common.llm_utils import summarize_and_classify_tables, tokenize_with_llm
+from common.misc_utils import get_logger, text_suffix, table_suffix, chunk_suffix, ContextAwareThreadPoolExecutor, create_llm_session
 from digitize.pdf_utils import get_toc, get_matching_header_lvl, load_pdf_pages, find_text_font_size, get_pdf_page_count, convert_doc
 from digitize.status import StatusManager
 from digitize.types import DocStatus, JobStatus, OutputFormat
@@ -234,6 +234,9 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
     """
     Process documents for ingestion pipeline.
     Each request is treated as fresh.
+    
+    Note: Uses ContextAwareThreadPoolExecutor to automatically propagate request_id
+    to worker threads for proper request tracing in logs.
     """
     # Partition files into light and heavy based on page count
     light_files, heavy_files = [], []
@@ -255,8 +258,8 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
             return batch_stats, batch_chunk_paths, batch_table_paths
 
         with ProcessPoolExecutor(max_workers=convert_worker) as converter_executor, \
-             ThreadPoolExecutor(max_workers=max_worker) as processor_executor, \
-             ThreadPoolExecutor(max_workers=max_worker) as chunker_executor:
+             ContextAwareThreadPoolExecutor(max_workers=max_worker) as processor_executor, \
+             ContextAwareThreadPoolExecutor(max_workers=max_worker) as chunker_executor:
 
             # A. Submit Conversions
             conversion_futures = {}

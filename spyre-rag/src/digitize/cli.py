@@ -3,9 +3,8 @@ import os
 import argparse
 from pathlib import Path
 
-from digitize.digitize_utils import *
-from common.misc_utils import *
-from digitize.types import *
+# Import only set_log_level before setting log level
+from common.misc_utils import set_log_level
 
 common_parser = argparse.ArgumentParser(add_help=False)
 common_parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -31,6 +30,10 @@ if command_args.debug:
 
 set_log_level(log_level)
 
+# Now import project modules after log level is set
+from digitize.digitize_utils import *
+from common.misc_utils import *
+from digitize.types import *
 from digitize.ingest import ingest
 from digitize.cleanup import reset_db
 

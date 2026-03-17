@@ -10,13 +10,9 @@ import uvicorn
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Query, status, Request
 from fastapi.openapi.docs import get_swagger_ui_html
-from common.misc_utils import get_logger, set_log_level, validate_pdf_file, set_request_id
-import digitize.digitize_utils as dg_util
-import digitize.types as types
-from digitize.digitize import digitize
-from digitize.errors import *
-import digitize.config as config
-from digitize.cleanup import reset_db
+
+# Set log level BEFORE importing project modules
+from common.misc_utils import set_log_level
 
 log_level = logging.INFO
 level = os.getenv("LOG_LEVEL", "").removeprefix("--").lower()
@@ -28,6 +24,14 @@ if level != "":
 
 set_log_level(log_level)
 
+# Now import project modules after log level is set
+from common.misc_utils import get_logger, validate_pdf_file, set_request_id
+import digitize.digitize_utils as dg_util
+import digitize.types as types
+from digitize.digitize import digitize
+from digitize.errors import *
+import digitize.config as config
+from digitize.cleanup import reset_db
 from digitize.ingest import ingest
 from digitize.status import StatusManager
 
