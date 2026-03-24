@@ -20,7 +20,7 @@ from docling.document_converter import DocumentConverter
 from docling_core.types.doc.document import DoclingDocument
 
 # Local application imports
-from common.misc_utils import get_logger
+from common.misc_utils import get_logger, DoclingConversionError
 from common.retry_utils import retry_on_transient_error
 from digitize.config import PDF_CHUNK_SIZE
 
@@ -148,17 +148,38 @@ def find_text_font_size(
 
     return matches
 
-@retry_on_transient_error(max_retries=3, initial_delay=1.0, backoff_multiplier=2.0, retryable_exceptions=(Exception,), allow_local_retries=True)
 def convert_chunk(doc_converter: DocumentConverter, path: Path, chunk_num: int, start_page: int, end_page: int, chunk_cache_dir: Path):
-    # Convert this chunk
-    conv_res: ConversionResult = doc_converter.convert(source=path, page_range=(start_page, end_page))
+    """Convert a single chunk of a PDF document.
     
-    # Save chunk result to cache
-    chunk_filename = chunk_cache_dir / f"chunk_{chunk_num:04d}.json"
-    conv_res.document.save_as_json(str(chunk_filename))
-    logger.debug(f"Saved chunk of {path}'s chunk {chunk_num} to {chunk_filename}")
+    Args:
+        doc_converter: DocumentConverter instance
+        path: Path to the PDF file
+        chunk_num: Chunk number for logging
+        start_page: Starting page number (1-based)
+        end_page: Ending page number (1-based, inclusive)
+        chunk_cache_dir: Directory to save chunk results
+        
+    Returns:
+        Path to the saved chunk JSON file
+        
+    Raises:
+        DoclingConversionError: If conversion or saving fails
+    """
+    try:
+        # Convert this chunk
+        conv_res: ConversionResult = doc_converter.convert(source=path, page_range=(start_page, end_page))
+        
+        # Save chunk result to cache
+        chunk_filename = chunk_cache_dir / f"chunk_{chunk_num:04d}.json"
+        conv_res.document.save_as_json(str(chunk_filename))
+        logger.debug(f"Saved chunk of {path}'s chunk {chunk_num} to {chunk_filename}")
 
-    return chunk_filename
+        return chunk_filename
+    except Exception as e:
+        # Wrap any exception in DoclingConversionError for retry handling
+        error_msg = f"Failed to convert chunk {chunk_num} (pages {start_page}-{end_page}) of {path}: {str(e)}"
+        logger.error(error_msg)
+        raise DoclingConversionError(error_msg) from e
 
 def convert_doc(path: str | Path, cache_dir: Optional[Path] = None) -> DoclingDocument:
     """
@@ -187,9 +208,14 @@ def convert_doc(path: str | Path, cache_dir: Optional[Path] = None) -> DoclingDo
     if total_pages <= PDF_CHUNK_SIZE:
         logger.debug(f"Converting {path} document with {total_pages} pages in single pass")
         
-        @retry_on_transient_error(max_retries=3, initial_delay=1.0, backoff_multiplier=2.0, retryable_exceptions=(Exception,), allow_local_retries=True)
+        @retry_on_transient_error(max_retries=3, initial_delay=1.0, backoff_multiplier=2.0, retryable_exceptions=(DoclingConversionError,), allow_local_retries=True)
         def _convert_single_doc():
-            return doc_converter.convert(source=path).document
+            try:
+                return doc_converter.convert(source=path).document
+            except Exception as e:
+                error_msg = f"Failed to convert document {path}: {str(e)}"
+                logger.error(error_msg)
+                raise DoclingConversionError(error_msg) from e
         
         return _convert_single_doc()
     
@@ -208,24 +234,33 @@ def convert_doc(path: str | Path, cache_dir: Optional[Path] = None) -> DoclingDo
     chunk_cache_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Process document in chunks and save each chunk
-        chunk_files = []
-        
-        for start_page in range(1, total_pages + 1, PDF_CHUNK_SIZE):
-            end_page = min(start_page + PDF_CHUNK_SIZE - 1, total_pages)
-            chunk_num = (start_page - 1) // PDF_CHUNK_SIZE + 1
+        # Define internal method with retry wrapper for document-level retries
+        @retry_on_transient_error(max_retries=3, initial_delay=1.0, backoff_multiplier=2.0, retryable_exceptions=(DoclingConversionError,), allow_local_retries=True)
+        def _process_chunks_with_retry():
+            """Process all chunks of the document and concatenate them.
             
-            logger.debug(f"Processing {path}'s chunk {chunk_num}/{total_chunks} (pages {start_page}-{end_page})")
-            chunk_file = convert_chunk(doc_converter, path, chunk_num, start_page, end_page, chunk_cache_dir)
-            chunk_files.append(chunk_file)
+            This method is wrapped with retry logic so that if any chunk fails,
+            the entire document processing is retried rather than just the failed chunk.
+            """
+            chunk_files = []
+            
+            for start_page in range(1, total_pages + 1, PDF_CHUNK_SIZE):
+                end_page = min(start_page + PDF_CHUNK_SIZE - 1, total_pages)
+                chunk_num = (start_page - 1) // PDF_CHUNK_SIZE + 1
+                
+                logger.debug(f"Processing {path}'s chunk {chunk_num}/{total_chunks} (pages {start_page}-{end_page})")
+                chunk_file = convert_chunk(doc_converter, path, chunk_num, start_page, end_page, chunk_cache_dir)
+                chunk_files.append(chunk_file)
+            
+            # Load all chunk documents and concatenate
+            docs = [DoclingDocument.load_from_json(filename=f) for f in chunk_files]
+            concatenated_doc = DoclingDocument.concatenate(docs=docs)
+            
+            logger.debug(f"Successfully concatenated {path}'s {len(docs)} chunks into single document")
+            
+            return concatenated_doc
         
-        # Load all chunk documents and concatenate
-        docs = [DoclingDocument.load_from_json(filename=f) for f in chunk_files]
-        concatenated_doc = DoclingDocument.concatenate(docs=docs)
-        
-        logger.debug(f"Successfully concatenated {path}'s {len(docs)} chunks into single document")
-        
-        return concatenated_doc
+        return _process_chunks_with_retry()
     
     finally:
         # Always cleanup cache directory
