@@ -6,6 +6,8 @@ metadata:
     ai-services.io/application: "{{ .AppName }}"
     ai-services.io/template: "{{ .AppTemplateName }}"
     ai-services.io/version: "{{ .Version }}"
+  annotations:
+    io.podman.annotations.pids-limit: "4096"
 spec:
   initContainers:
     - name: sysctl-vm-max-map-count
