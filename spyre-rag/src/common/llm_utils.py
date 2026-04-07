@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from common.lang_utils import prompt_map
 from common.misc_utils import get_logger
-from common.settings import get_settings
+import common.config as config
 from common.retry_utils import retry_on_transient_error
 import common.misc_utils as misc_utils
 
@@ -22,10 +22,8 @@ def tqdm_wrapper(iterable, **kwargs):
     else:
         return iterable
 
-settings = get_settings()
-
 def classify_text_with_llm(text_blocks, gen_model, llm_endpoint, pdf_path, batch_size=32):
-    all_prompts = [settings.prompts.llm_classify.format(text=item.strip()) for item in text_blocks]
+    all_prompts = [config.LLM_CLASSIFY_PROMPT.format(text=item.strip()) for item in text_blocks]
     decisions = []
 
     # Process in batches using ThreadPoolExecutor for parallelism
@@ -78,7 +76,7 @@ def summarize_single_table(prompt, gen_model, llm_endpoint):
     return reply
 
 def summarize_table(table_html, gen_model, llm_endpoint, pdf_path, max_workers=32):
-    all_prompts = [settings.prompts.table_summary.format(content=html) for html in table_html]
+    all_prompts = [config.TABLE_SUMMARY_PROMPT.format(content=html) for html in table_html]
 
     summaries = [None] * len(all_prompts)
 
@@ -112,12 +110,15 @@ def query_vllm_payload(question, documents, llm_endpoint, llm_model, stop_words,
 
     # dynamic chunk truncation: truncates the context, if doesn't fit in the sequence length
     question_token_count = len(tokenize_with_llm(question, llm_endpoint))
-    reamining_tokens = settings.max_input_length - (settings.prompt_template_token_count + question_token_count)
+    reamining_tokens = config.MAX_INPUT_LENGTH - (config.PROMPT_TEMPLATE_TOKEN_COUNT + question_token_count)
     context = detokenize_with_llm(tokenize_with_llm(context, llm_endpoint)[:reamining_tokens], llm_endpoint)
     logger.debug(f"Truncated Context: {context}")
 
     prompt_key = prompt_map.get(lang, "query_vllm_stream")
-    prompt = getattr(settings.prompts, prompt_key).format(context=context, question=question)
+    if lang == "DE":
+        prompt = config.QUERY_VLLM_STREAM_DE_PROMPT.format(context=context, question=question)
+    else:
+        prompt = config.QUERY_VLLM_STREAM_PROMPT.format(context=context, question=question)
 
     logger.debug("PROMPT:  ", prompt)
     headers = {
@@ -233,7 +234,7 @@ def query_vllm_summarize(
         "accept": "application/json",
         "Content-type": "application/json",
     }
-    stop_words = [w for w in settings.summarization_stop_words.split(",") if w]
+    stop_words = [w for w in config.SUMMARIZATION_STOP_WORDS.split(",") if w]
     payload = {
         "messages": messages,
         "model": model,
@@ -277,7 +278,7 @@ def query_vllm_summarize_stream(
         "accept": "application/json",
         "Content-type": "application/json",
     }
-    stop_words = [w for w in settings.summarization_stop_words.split(",") if w]
+    stop_words = [w for w in config.SUMMARIZATION_STOP_WORDS.split(",") if w]
     payload = {
         "messages": messages,
         "model": model,

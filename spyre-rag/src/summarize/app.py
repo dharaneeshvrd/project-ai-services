@@ -25,8 +25,8 @@ set_log_level(log_level)
 
 from common.llm_utils import query_vllm_summarize, query_vllm_summarize_stream
 from common.misc_utils import get_model_endpoints, set_request_id, create_llm_session, configure_uvicorn_logging
-from common.settings import get_settings
 from common.error_utils import http_error_responses
+import common.config as config
 from summarize.summ_utils import (
     SummarizeException,
     word_count,
@@ -42,15 +42,14 @@ from summarize.summ_utils import (
 
 logger = get_logger("app")
 
-settings = get_settings()
-concurrency_limiter = asyncio.BoundedSemaphore(settings.max_concurrent_requests)
+concurrency_limiter = asyncio.BoundedSemaphore(config.MAX_CONCURRENT_REQUESTS)
 
 @asynccontextmanager
 async def lifespan(app):
     filtered_paths = ['/health']
     configure_uvicorn_logging(log_level, filtered_paths)
     initialize_models()
-    create_llm_session(pool_maxsize=settings.max_concurrent_requests)
+    create_llm_session(pool_maxsize=config.MAX_CONCURRENT_REQUESTS)
     yield
 
 # OpenAPI tags metadata for endpoint organization
@@ -161,7 +160,7 @@ async def handle_summarize(
                 messages=messages,
                 model=llm_model,
                 max_tokens=max_tokens,
-                temperature=settings.summarization_temperature,
+                temperature=config.SUMMARIZATION_TEMPERATURE,
             )
         except Exception as e:
             logger.error(f"LLM call failed with error: {e}")
@@ -187,7 +186,7 @@ async def handle_summarize(
             messages=messages,
             model=llm_model,
             max_tokens=max_tokens,
-            temperature=settings.summarization_temperature,
+            temperature=config.SUMMARIZATION_TEMPERATURE,
         )
         logger.info(f"Input tokens: {in_tokens}, output tokens: {out_tokens}")
         elapsed_ms = int((time.time() - start) * 1000)
