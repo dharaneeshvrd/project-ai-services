@@ -6,4 +6,3 @@ COPY common common
 COPY digitize digitize
 COPY chatbot chatbot
 COPY summarize summarize
-COPY settings.json .
