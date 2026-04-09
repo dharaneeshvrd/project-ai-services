@@ -1,36 +1,25 @@
 import asyncio
 import json
-import logging
-import os
 import uuid
-import shutil
 from typing import List, Optional
 from contextlib import asynccontextmanager
 import uvicorn
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Query, status, Request
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import JSONResponse
 
-from common.misc_utils import set_log_level
+from common.misc_utils import set_log_level, get_logger
+import common.config as common_config
+import digitize.config as config
 
-log_level = logging.INFO
-level = os.getenv("LOG_LEVEL", "").removeprefix("--").lower()
-if level != "":
-    if "debug" in level:
-        log_level = logging.DEBUG
-    elif not "info" in level:
-        logging.warning(f"Unknown LOG_LEVEL passed: '{level}', defaulting to INFO.")
+set_log_level(common_config.LOG_LEVEL)
 
-set_log_level(log_level)
-
-from common.misc_utils import get_logger, validate_pdf_file, set_request_id, configure_uvicorn_logging
-
+from common.misc_utils import validate_pdf_file, set_request_id, configure_uvicorn_logging
 from common.error_utils import APIError, ErrorCode, http_error_responses, http_exception_handler
 import digitize.digitize_utils as dg_util
 import digitize.types as types
 from digitize.digitize import digitize
-import common.config as config
+import digitize.config as config
 from digitize.cleanup import reset_db
 from digitize.ingest import ingest
 from digitize.status import StatusManager
@@ -46,7 +35,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan events (startup and shutdown)."""
     # Startup
     filtered_paths = ['/health', '/v1/jobs']
-    configure_uvicorn_logging(log_level, filtered_paths)
+    configure_uvicorn_logging(common_config.LOG_LEVEL, filtered_paths)
     logger.info("Application starting up...")
 
     # Scan for orphan jobs and mark them as failed
