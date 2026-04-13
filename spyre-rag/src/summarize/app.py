@@ -12,9 +12,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool
 
 from common.misc_utils import set_log_level, get_logger
-from summarize.settings import Settings
+from summarize.settings import settings
 
-set_log_level(Settings.common.app.log_level)
+set_log_level(settings.common.app.log_level)
 
 from common.llm_utils import query_vllm_summarize, query_vllm_summarize_stream
 from common.misc_utils import get_model_endpoints, set_request_id, create_llm_session, configure_uvicorn_logging
@@ -34,14 +34,14 @@ from summarize.summ_utils import (
 
 logger = get_logger("app")
 
-concurrency_limiter = asyncio.BoundedSemaphore(Settings.summarize.max_concurrent_requests)
+concurrency_limiter = asyncio.BoundedSemaphore(settings.summarize.max_concurrent_requests)
 
 @asynccontextmanager
 async def lifespan(app):
     filtered_paths = ['/health']
-    configure_uvicorn_logging(Settings.common.app.log_level, filtered_paths)
+    configure_uvicorn_logging(settings.common.app.log_level, filtered_paths)
     initialize_models()
-    create_llm_session(pool_maxsize=Settings.common.llm.llm_max_batch_size)
+    create_llm_session(pool_maxsize=settings.common.llm.llm_max_batch_size)
     yield
 
 # OpenAPI tags metadata for endpoint organization
@@ -152,7 +152,7 @@ async def handle_summarize(
                 messages=messages,
                 model=llm_model,
                 max_tokens=max_tokens,
-                temperature=Settings.summarize.summarization_temperature,
+                temperature=settings.summarize.summarization_temperature,
             )
         except Exception as e:
             logger.error(f"LLM call failed with error: {e}")
@@ -178,7 +178,7 @@ async def handle_summarize(
             messages=messages,
             model=llm_model,
             max_tokens=max_tokens,
-            temperature=Settings.summarize.summarization_temperature,
+            temperature=settings.summarize.summarization_temperature,
         )
         logger.info(f"Input tokens: {in_tokens}, output tokens: {out_tokens}")
         elapsed_ms = int((time.time() - start) * 1000)
