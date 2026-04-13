@@ -253,7 +253,25 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
 
     status_mgr = StatusManager(job_id)
 
-    def _run_batch(batch_paths, convert_worker, max_worker, doc_id_dict):
+    def _run_batch(batch_paths, convert_worker, max_worker, doc_id_dict, out_path, llm_model, llm_endpoint, emb_endpoint, max_tokens, status_mgr):
+        """
+        Process a batch of documents through the staged ingestion pipeline.
+        
+        Args:
+            batch_paths: List of document paths to process
+            convert_worker: Number of workers for conversion stage
+            max_worker: Number of workers for processing and chunking stages
+            doc_id_dict: Mapping of filenames to document IDs
+            out_path: Output directory path
+            llm_model: LLM model name
+            llm_endpoint: LLM endpoint URL
+            emb_endpoint: Embedding endpoint URL
+            max_tokens: Maximum tokens for chunking
+            status_mgr: StatusManager instance for tracking document status
+            
+        Returns:
+            Tuple of (batch_stats, batch_chunk_paths, batch_table_paths)
+        """
         batch_stats = {}
         batch_chunk_paths = []
         batch_table_paths = []
@@ -265,227 +283,238 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
         batch_doc_ids = {doc_id_dict.get(Path(path).name) for path in batch_paths if doc_id_dict.get(Path(path).name)}
         processed_doc_ids = set()  # Track which documents completed processing
 
-        with ProcessPoolExecutor(max_workers=convert_worker) as converter_executor, \
-             ContextAwareThreadPoolExecutor(max_workers=max_worker) as processor_executor, \
-             ContextAwareThreadPoolExecutor(max_workers=max_worker) as chunker_executor:
+        # Create executors manually to avoid hanging on broken pool cleanup
+        converter_executor = None
+        processor_executor = None
+        chunker_executor = None
+        
+        try:
+            with ProcessPoolExecutor(max_workers=convert_worker) as converter_executor, \
+                ContextAwareThreadPoolExecutor(max_workers=max_worker) as processor_executor, \
+                ContextAwareThreadPoolExecutor(max_workers=max_worker) as chunker_executor:
 
-            # A. Submit Conversions
-            conversion_futures = {}
-            process_futures = {}
-            chunk_futures = {}
+                # A. Submit Conversions
+                conversion_futures = {}
+                process_futures = {}
+                chunk_futures = {}
 
-            for path in batch_paths:
-                file_name = ""
-                doc_id = doc_id_dict.get(Path(path).name)
-                if doc_id is None:
-                    file_name = path
-                else:
-                    file_name = doc_id
+                for path in batch_paths:
+                    file_name = ""
+                    doc_id = doc_id_dict.get(Path(path).name)
+                    if doc_id is None:
+                        file_name = path
+                    else:
+                        file_name = doc_id
 
-                try:
-                    future = converter_executor.submit(convert_document, path, out_path, file_name)
-                    conversion_futures[future] = path
-                    # Update status to IN_PROGRESS as soon as document is submitted for conversion
-                    if doc_id is not None:
-                        logger.debug(f"Submitted for conversion: updating job & doc metadata to IN_PROGRESS for document: {doc_id}")
-                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.IN_PROGRESS})
-                        status_mgr.update_job_progress(doc_id, DocStatus.IN_PROGRESS, JobStatus.IN_PROGRESS)
-                except (BrokenExecutor, RuntimeError) as e:
-                    # Pool is broken, cannot submit more documents
-                    logger.error(f"Cannot submit document {path} - pool is broken: {e}")
-                    if doc_id:
-                        error_msg = f"Process pool broken before submission: {str(e)}"
-                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
-                        status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
-                        processed_doc_ids.add(doc_id)
-                    # Stop trying to submit more documents
-                    break
-                except Exception as e:
-                    # Handle any other unexpected failures during document submission
-                    logger.error(f"Unexpected error submitting document {path} for conversion: {e}", exc_info=True)
-                    if doc_id:
-                        error_msg = f"Failed to submit document for conversion: {str(e)}"
-                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
-                        status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
-                        processed_doc_ids.add(doc_id)
-                    # Continue processing other documents
-                    continue
-
-            # B. Handle Conversions -> Submit Processing
-            for fut in as_completed(conversion_futures):
-                path = conversion_futures[fut]
-                doc_id = doc_id_dict.get(Path(path).name)
-                try:
-                    converted_json, conv_time = fut.result()
-
-                    if not converted_json:
+                    try:
+                        future = converter_executor.submit(convert_document, path, out_path, file_name)
+                        conversion_futures[future] = path
+                        # Update status to IN_PROGRESS as soon as document is submitted for conversion
                         if doc_id is not None:
-                            logger.error(f"Conversion failed for {path}: converted_json is None")
-                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error="Failed to convert document: conversion returned None")
+                            logger.debug(f"Submitted for conversion: updating job & doc metadata to IN_PROGRESS for document: {doc_id}")
+                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.IN_PROGRESS})
+                            status_mgr.update_job_progress(doc_id, DocStatus.IN_PROGRESS, JobStatus.IN_PROGRESS)
+                    except (BrokenExecutor, RuntimeError) as e:
+                        # Pool is broken, cannot submit more documents
+                        logger.error(f"Cannot submit document {path} - pool is broken: {e}")
+                        if doc_id:
+                            error_msg = f"Process pool broken before submission: {str(e)}"
+                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
                             status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
                             processed_doc_ids.add(doc_id)
-                        continue
-
-                    # Update persistence and session stats
-                    batch_stats[path] = {"timings": {"digitizing": round(float(conv_time or 0), 2)}}
-
-                    if doc_id is not None:
-                        logger.debug(f"Conversion Done: updating doc & job metadata for document: {doc_id}")
-                        status_mgr.update_doc_metadata(doc_id, {
-                            "status": DocStatus.DIGITIZED,
-                            "timing_in_secs": {**batch_stats[path]["timings"]}
-                        })
-                        status_mgr.update_job_progress(doc_id, DocStatus.DIGITIZED, JobStatus.IN_PROGRESS)
-                        processed_doc_ids.add(doc_id)
-
-                    p_future = processor_executor.submit(
-                        process_converted_document, converted_json, path, out_path,
-                        llm_model, llm_endpoint, emb_endpoint, max_tokens, doc_id=doc_id
-                    )
-                    process_futures[p_future] = str(path)
-                except (BrokenExecutor, RuntimeError) as e:
-                    # Pool is broken, cannot submit more documents
-                    logger.error(f"Cannot submit document {path} for processing - pool is broken: {e}")
-                    batch_stats.pop(path, {})
-                    if doc_id:
-                        error_msg = f"Process pool broken during conversion: {str(e)}"
-                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
-                        status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
-                        processed_doc_ids.add(doc_id)
-                    # Stop trying to process more documents
-                    break
-                except Exception as e:
-                    # Handle any other unexpected failures during conversion
-                    logger.error(f"Unexpected error during conversion for {path}: {e}", exc_info=True)
-                    batch_stats.pop(path, {})
-                    if doc_id:
-                        error_msg = f"Failed during conversion: {str(e)}"
-                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
-                        status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
-                        processed_doc_ids.add(doc_id)
-                    # Continue processing other documents
-                    continue
-
-            # C. Handle Processing -> Submit Chunking
-            for fut in as_completed(process_futures):
-                path = process_futures[fut]
-                doc_id = doc_id_dict.get(Path(path).name)
-                try:
-                    txt_json, tab_json, pgs, tabs, timings = fut.result()
-
-                    if not txt_json or not tab_json:
-                        if doc_id is not None:
-                            logger.error(f"Processing failed for {path}: txt_json or tab_json is None")
-                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=f"Failed to process document {doc_id}: processing returned None")
+                    except Exception as e:
+                        # Handle any other unexpected failures during document submission
+                        logger.error(f"Unexpected error submitting document {path} for conversion: {e}", exc_info=True)
+                        if doc_id:
+                            error_msg = f"Failed to submit document for conversion: {str(e)}"
+                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
                             status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
                             processed_doc_ids.add(doc_id)
+
+                logger.info("Waiting for conversion completions")
+                # B. Handle Conversions -> Submit Processing
+                for fut in as_completed(conversion_futures, timeout=300):
+                    path = conversion_futures[fut]
+                    doc_id = doc_id_dict.get(Path(path).name)
+                    try:
+                        converted_json, conv_time = fut.result()
+
+                        if not converted_json:
+                            if doc_id is not None:
+                                logger.error(f"Conversion failed for {path}: converted_json is None")
+                                status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error="Failed to convert document: conversion returned None")
+                                status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
+                                processed_doc_ids.add(doc_id)
+                            continue
+
+                        # Update persistence and session stats
+                        batch_stats[path] = {"timings": {"digitizing": round(float(conv_time or 0), 2)}}
+
+                        if doc_id is not None:
+                            logger.debug(f"Conversion Done: updating doc & job metadata for document: {doc_id}")
+                            status_mgr.update_doc_metadata(doc_id, {
+                                "status": DocStatus.DIGITIZED,
+                                "timing_in_secs": {**batch_stats[path]["timings"]}
+                            })
+                            status_mgr.update_job_progress(doc_id, DocStatus.DIGITIZED, JobStatus.IN_PROGRESS)
+                            processed_doc_ids.add(doc_id)
+
+                        p_future = processor_executor.submit(
+                            process_converted_document, converted_json, path, out_path,
+                            llm_model, llm_endpoint, emb_endpoint, max_tokens, doc_id=doc_id
+                        )
+                        logger.info(f"submitted for processing: {path}")
+                        process_futures[p_future] = str(path)
+                    except (BrokenExecutor, RuntimeError) as e:
+                        # Pool is broken, cannot submit more documents
+                        logger.error(f"Cannot submit document {path} for processing - pool is broken: {e}")
                         batch_stats.pop(path, {})
-                        continue
-
-                    total_processing_time = timings["process_text"] + timings["process_tables"]
-                    batch_stats[path].update({
-                        "page_count": pgs,
-                        "table_count": tabs
-                    })
-                    batch_stats[path]["timings"]["processing"] = round(float(total_processing_time or 0), 2)
-                    batch_table_paths.append(tab_json)
-
-                    if doc_id is not None:
-                        logger.debug(f"Processing Done: updating doc & job metadata for document: {doc_id}")
-                        status_mgr.update_doc_metadata(doc_id, {
-                            "status": DocStatus.PROCESSED,
-                            "pages": pgs,
-                            "tables": tabs,
-                            "timing_in_secs": {**batch_stats[path]["timings"]}
-                        })
-                        status_mgr.update_job_progress(
-                            doc_id=doc_id,
-                            doc_status=DocStatus.PROCESSED,  # Transitioning within processing
-                            job_status=JobStatus.IN_PROGRESS
-                    )
-                        processed_doc_ids.add(doc_id)
-
-                    c_future = chunker_executor.submit(
-                        chunk_single_file, txt_json, path, out_path,
-                        emb_endpoint, max_tokens, doc_id=doc_id
-                    )
-                    chunk_futures[c_future] = (str(path), tab_json)
-                except (BrokenExecutor, RuntimeError) as e:
-                    # Pool is broken, cannot submit more documents
-                    logger.error(f"Cannot submit document {path} for chunking - pool is broken: {e}")
-                    batch_stats.pop(path, {})
-                    if doc_id:
-                        error_msg = f"Process pool broken during processing: {str(e)}"
-                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
-                        status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
-                        processed_doc_ids.add(doc_id)
-                    # Stop trying to process more documents
-                    break
-                except Exception as e:
-                    # Handle any other unexpected failures during processing
-                    logger.error(f"Unexpected error during processing for {path}: {e}", exc_info=True)
-                    batch_stats.pop(path, {})
-                    if doc_id:
-                        error_msg = f"Failed during processing: {str(e)}"
-                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
-                        status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
-                        processed_doc_ids.add(doc_id)
-                    # Continue processing other documents
-                    continue
-
-            # D. Handle Chunking
-            for fut in as_completed(chunk_futures):
-                path, tab_json = chunk_futures[fut]
-                doc_id = doc_id_dict.get(Path(path).name)
-                try:
-                    chunk_json, _, chunk_time = fut.result()
-
-                    if not chunk_json:
-                        if doc_id is not None:
-                            logger.error(f"Chunking failed for {path}: chunk_json is None")
-                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=f"failed to chunk document {doc_id}: chunk_json returned is None")
+                        if doc_id:
+                            error_msg = f"Process pool broken during conversion: {str(e)}"
+                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
                             status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
                             processed_doc_ids.add(doc_id)
+                    except Exception as e:
+                        # Handle any other unexpected failures during conversion
+                        logger.error(f"Unexpected error during conversion for {path}: {e}", exc_info=True)
                         batch_stats.pop(path, {})
-                        continue
+                        if doc_id:
+                            error_msg = f"Failed during conversion: {str(e)}"
+                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
+                            status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
+                            processed_doc_ids.add(doc_id)
 
-                    batch_stats[path]["timings"]["chunking"] = round(float(chunk_time or 0), 2)
-                    batch_chunk_paths.append(chunk_json)
-                    # Capture chunk counts in real time and update <doc_id>_metadata.json
-                    chunk_count = count_chunks(chunk_json, tab_json)
-                    batch_stats[path]["chunk_count"] = chunk_count
+                logger.info(f"waiting for process futures completion, len: {len(process_futures)}")
 
-                    if doc_id is not None:
-                        logger.debug(f"Chunking Done: updating doc & job metadata for document: {doc_id}")
-                        status_mgr.update_doc_metadata(doc_id, {
-                            "status": DocStatus.CHUNKED,
-                            "chunks": chunk_count,
-                            "timing_in_secs": {**batch_stats[path]["timings"]}
+                # C. Handle Processing -> Submit Chunking
+                for fut in as_completed(process_futures, timeout=300):
+                    path = process_futures[fut]
+                    doc_id = doc_id_dict.get(Path(path).name)
+                    try:
+                        txt_json, tab_json, pgs, tabs, timings = fut.result()
+
+                        if not txt_json or not tab_json:
+                            if doc_id is not None:
+                                logger.error(f"Processing failed for {path}: txt_json or tab_json is None")
+                                status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=f"Failed to process document {doc_id}: processing returned None")
+                                status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
+                                processed_doc_ids.add(doc_id)
+                            batch_stats.pop(path, {})
+                            continue
+
+                        total_processing_time = timings["process_text"] + timings["process_tables"]
+                        batch_stats[path].update({
+                            "page_count": pgs,
+                            "table_count": tabs
                         })
-                        status_mgr.update_job_progress(doc_id, DocStatus.CHUNKED, JobStatus.IN_PROGRESS)
-                        processed_doc_ids.add(doc_id)
-                except Exception as e:
-                    # Handle any unexpected failures during chunking
-                    logger.error(f"Unexpected error during chunking for {path}: {e}", exc_info=True)
-                    batch_stats.pop(path, {})
-                    if doc_id:
-                        error_msg = f"Failed during chunking: {str(e)}"
-                        status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
-                        status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
-                        processed_doc_ids.add(doc_id)
-                    # Continue processing other documents
-                    continue
+                        batch_stats[path]["timings"]["processing"] = round(float(total_processing_time or 0), 2)
+                        batch_table_paths.append(tab_json)
 
-        # CRITICAL: Mark any documents that were never processed as FAILED
-        # This handles the case where pool crashes before all documents are submitted/processed
-        orphaned_doc_ids = batch_doc_ids - processed_doc_ids
-        if orphaned_doc_ids:
-            logger.warning(f"Found {len(orphaned_doc_ids)} orphaned document(s) in batch that were never processed")
-            for orphan_doc_id in orphaned_doc_ids:
-                error_msg = "Document was never processed - pool may have crashed or been exhausted"
-                logger.warning(f"Marking orphaned document {orphan_doc_id} as FAILED")
-                status_mgr.update_doc_metadata(orphan_doc_id, {"status": DocStatus.FAILED}, error=error_msg)
-                status_mgr.update_job_progress(orphan_doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
+                        if doc_id is not None:
+                            logger.debug(f"Processing Done: updating doc & job metadata for document: {doc_id}")
+                            status_mgr.update_doc_metadata(doc_id, {
+                                "status": DocStatus.PROCESSED,
+                                "pages": pgs,
+                                "tables": tabs,
+                                "timing_in_secs": {**batch_stats[path]["timings"]}
+                            })
+                            status_mgr.update_job_progress(
+                                doc_id=doc_id,
+                                doc_status=DocStatus.PROCESSED,  # Transitioning within processing
+                                job_status=JobStatus.IN_PROGRESS
+                        )
+                            processed_doc_ids.add(doc_id)
+
+
+                        c_future = chunker_executor.submit(
+                            chunk_single_file, txt_json, path, out_path,
+                            emb_endpoint, max_tokens, doc_id=doc_id
+                        )
+                        chunk_futures[c_future] = (str(path), tab_json)
+                    except (BrokenExecutor, RuntimeError) as e:
+                        # Pool is broken, cannot submit more documents
+                        logger.error(f"Cannot submit document {path} for chunking - pool is broken: {e}")
+                        batch_stats.pop(path, {})
+                        if doc_id:
+                            error_msg = f"Process pool broken during processing: {str(e)}"
+                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
+                            status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
+                            processed_doc_ids.add(doc_id)                        
+                    except Exception as e:
+                        # Handle any other unexpected failures during processing
+                        logger.error(f"Unexpected error during processing for {path}: {e}", exc_info=True)
+                        batch_stats.pop(path, {})
+                        if doc_id:
+                            error_msg = f"Failed during processing: {str(e)}"
+                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
+                            status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
+                            processed_doc_ids.add(doc_id)
+
+                logger.info(f"before chunking, len: {len(chunk_futures)}")
+                # D. Handle Chunking
+                for fut in as_completed(chunk_futures, timeout=300):
+                    path, tab_json = chunk_futures[fut]
+                    doc_id = doc_id_dict.get(Path(path).name)
+                    try:
+                        chunk_json, _, chunk_time = fut.result()
+
+                        if not chunk_json:
+                            if doc_id is not None:
+                                logger.error(f"Chunking failed for {path}: chunk_json is None")
+                                status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=f"failed to chunk document {doc_id}: chunk_json returned is None")
+                                status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
+                                processed_doc_ids.add(doc_id)
+                            batch_stats.pop(path, {})
+                            continue
+
+                        batch_stats[path]["timings"]["chunking"] = round(float(chunk_time or 0), 2)
+                        batch_chunk_paths.append(chunk_json)
+                        # Capture chunk counts in real time and update <doc_id>_metadata.json
+                        chunk_count = count_chunks(chunk_json, tab_json)
+                        batch_stats[path]["chunk_count"] = chunk_count
+
+                        if doc_id is not None:
+                            logger.debug(f"Chunking Done: updating doc & job metadata for document: {doc_id}")
+                            status_mgr.update_doc_metadata(doc_id, {
+                                "status": DocStatus.CHUNKED,
+                                "chunks": chunk_count,
+                                "timing_in_secs": {**batch_stats[path]["timings"]}
+                            })
+                            status_mgr.update_job_progress(doc_id, DocStatus.CHUNKED, JobStatus.IN_PROGRESS)
+                            processed_doc_ids.add(doc_id)
+                    except Exception as e:
+                        # Handle any unexpected failures during chunking
+                        logger.error(f"Unexpected error during chunking for {path}: {e}", exc_info=True)
+                        batch_stats.pop(path, {})
+                        if doc_id:
+                            error_msg = f"Failed during chunking: {str(e)}"
+                            status_mgr.update_doc_metadata(doc_id, {"status": DocStatus.FAILED}, error=error_msg)
+                            status_mgr.update_job_progress(doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
+                            processed_doc_ids.add(doc_id)
+            logger.info("after chunking")
+        except Exception as e:
+            # Catch any unhandled exceptions from the executor context (e.g., BrokenProcessPool)
+            logger.error(f"Executor context failed with exception: {e}", exc_info=True)
+            # Don't re-raise - we want to continue to orphaned document detection
+        finally:
+            # Skip explicit executor shutdown to avoid hanging on broken pools
+            # Python's garbage collector will clean them up
+            logger.info("Skipping executor shutdown to avoid hanging on broken pools")
+            
+            # ALWAYS run orphaned document detection, even if executors crashed
+            logger.info(f"batch_doc_ids: {batch_doc_ids}, processed_doc_ids: {processed_doc_ids}")
+
+            # CRITICAL: Mark any documents that were never processed as FAILED
+            # This handles the case where pool crashes before all documents are submitted/processed
+            orphaned_doc_ids = batch_doc_ids - processed_doc_ids
+            logger.info(f"orphaned_doc_ids: {orphaned_doc_ids}")
+            if orphaned_doc_ids:
+                logger.warning(f"Found {len(orphaned_doc_ids)} orphaned document(s) in batch that were never processed")
+                for orphan_doc_id in orphaned_doc_ids:
+                    error_msg = "Document was never processed - pool may have crashed or been exhausted"
+                    logger.warning(f"Marking orphaned document {orphan_doc_id} as FAILED")
+                    status_mgr.update_doc_metadata(orphan_doc_id, {"status": DocStatus.FAILED}, error=error_msg)
+                    status_mgr.update_job_progress(orphan_doc_id, DocStatus.FAILED, JobStatus.IN_PROGRESS)
 
         return batch_stats, batch_chunk_paths, batch_table_paths
 
@@ -493,15 +522,21 @@ def process_documents(input_paths, out_path, llm_model, llm_endpoint, emb_endpoi
     try:
         # Process Light Batch
         l_worker = min(WORKER_SIZE, len(light_files)) if light_files else 0
+        logger.info(f"submitting light pdfs: {l_worker}, {light_files}")
         l_stats, l_chunks_json, l_tabs_json = _run_batch(
-            light_files, convert_worker=l_worker, max_worker=l_worker, doc_id_dict=doc_id_dict
+            light_files, convert_worker=l_worker, max_worker=l_worker, doc_id_dict=doc_id_dict,
+            out_path=out_path, llm_model=llm_model, llm_endpoint=llm_endpoint,
+            emb_endpoint=emb_endpoint, max_tokens=max_tokens, status_mgr=status_mgr
         )
 
         # Process Heavy Batch
         h_worker = min(WORKER_SIZE, len(heavy_files)) if heavy_files else 0
         h_conv_worker = min(HEAVY_PDF_CONVERT_WORKER_SIZE, len(heavy_files)) if heavy_files else 0
+        logger.info(f"submitting heavy pdfs: {h_conv_worker}, {h_worker}")
         h_stats, h_chunks_json, h_tabs_json = _run_batch(
-            heavy_files, convert_worker=h_conv_worker, max_worker=h_worker, doc_id_dict=doc_id_dict
+            heavy_files, convert_worker=h_conv_worker, max_worker=h_worker, doc_id_dict=doc_id_dict,
+            out_path=out_path, llm_model=llm_model, llm_endpoint=llm_endpoint,
+            emb_endpoint=emb_endpoint, max_tokens=max_tokens, status_mgr=status_mgr
         )
 
         # Combine statistics for the final return
@@ -808,11 +843,11 @@ def create_chunk_documents(in_txt_f, in_tab_f, orig_fn):
                 meta_info += f"Subsection: {block.get('subsection_title')} "
             if block.get('subsubsection_title'):
                 meta_info += f"Subsubsection: {block.get('subsubsection_title')} "
-            
+
             # Extract page number from page_range (use first page if multiple)
             page_range = block.get("page_range", [])
             page_number = page_range[0] if page_range and len(page_range) > 0 else None
-            
+
             txt_docs.append({
                 "page_content": f'{meta_info}\n{block.get("content")}' if meta_info != '' else block.get("content"),
                 "filename": orig_fn,
@@ -829,7 +864,7 @@ def create_chunk_documents(in_txt_f, in_tab_f, orig_fn):
         tab_data = list(tab_data.values())
         txt_count = len(txt_docs)
         for tab_idx, block in enumerate(tab_data):
-            # TODO: add page_number for the tables content            
+            # TODO: add page_number for the tables content
             tab_docs.append({
                 "page_content": f"{block.get('caption')}\n\n{block.get('summary')}" if block.get("caption") else block.get("summary"),
                 "filename": orig_fn,
@@ -841,7 +876,7 @@ def create_chunk_documents(in_txt_f, in_tab_f, orig_fn):
             })
 
     combined_docs = txt_docs + tab_docs
-    
+
     # Add total_chunks to all documents
     total_chunks = len(combined_docs)
     for doc in combined_docs:
