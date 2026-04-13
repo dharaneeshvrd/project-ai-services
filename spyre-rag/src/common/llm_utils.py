@@ -7,10 +7,10 @@ from tqdm import tqdm
 
 from common.lang_utils import get_prompt_for_language
 from common.misc_utils import get_logger
-import common.config as config
+from common.settings import settings as common_settings
 from common.retry_utils import retry_on_transient_error
-from summarize.config import SUMMARIZATION_STOP_WORDS
-from digitize.config import LLM_CLASSIFY_PROMPT, TABLE_SUMMARY_PROMPT
+from summarize.settings import settings as summarize_settings
+from digitize.settings import settings as digitize_settings
 import common.misc_utils as misc_utils
 
 logger = get_logger("LLM")
@@ -25,7 +25,7 @@ def tqdm_wrapper(iterable, **kwargs):
         return iterable
 
 def classify_text_with_llm(text_blocks, gen_model, llm_endpoint, pdf_path, batch_size=32):
-    all_prompts = [LLM_CLASSIFY_PROMPT.format(text=item.strip()) for item in text_blocks]
+    all_prompts = [digitize_settings.digitize.llm_classify_prompt.format(text=item.strip()) for item in text_blocks]
     decisions = []
 
     # Process in batches using ThreadPoolExecutor for parallelism
@@ -78,7 +78,7 @@ def summarize_single_table(prompt, gen_model, llm_endpoint):
     return reply
 
 def summarize_table(table_html, gen_model, llm_endpoint, pdf_path, max_workers=32):
-    all_prompts = [TABLE_SUMMARY_PROMPT.format(content=html) for html in table_html]
+    all_prompts = [digitize_settings.digitize.table_summary_prompt.format(content=html) for html in table_html]
 
     summaries = [None] * len(all_prompts)
 
@@ -112,7 +112,9 @@ def query_vllm_payload(question, documents, llm_endpoint, llm_model, stop_words,
 
     # dynamic chunk truncation: truncates the context, if doesn't fit in the sequence length
     question_token_count = len(tokenize_with_llm(question, llm_endpoint))
-    reamining_tokens = config.MAX_INPUT_LENGTH - (config.PROMPT_TEMPLATE_TOKEN_COUNT + question_token_count)
+    reamining_tokens = common_settings.llm.max_input_length - (
+        common_settings.llm.prompt_template_token_count + question_token_count
+    )
     context = detokenize_with_llm(tokenize_with_llm(context, llm_endpoint)[:reamining_tokens], llm_endpoint)
     logger.debug(f"Truncated Context: {context}")
 
@@ -234,7 +236,7 @@ def query_vllm_summarize(
         "accept": "application/json",
         "Content-type": "application/json",
     }
-    stop_words = [w for w in SUMMARIZATION_STOP_WORDS.split(",") if w]
+    stop_words = [w for w in summarize_settings.summarize.summarization_stop_words.split(",") if w]
     payload = {
         "messages": messages,
         "model": model,
@@ -278,7 +280,7 @@ def query_vllm_summarize_stream(
         "accept": "application/json",
         "Content-type": "application/json",
     }
-    stop_words = [w for w in SUMMARIZATION_STOP_WORDS.split(",") if w]
+    stop_words = [w for w in summarize_settings.summarize.summarization_stop_words.split(",") if w]
     payload = {
         "messages": messages,
         "model": model,
