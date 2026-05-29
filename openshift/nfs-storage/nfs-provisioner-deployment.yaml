@@ -1,0 +1,57 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nfs-client-provisioner
+  namespace: nfs-provisioner
+  labels:
+    app: nfs-client-provisioner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nfs-client-provisioner
+  template:
+    metadata:
+      labels:
+        app: nfs-client-provisioner
+    spec:
+      serviceAccountName: nfs-client-provisioner
+      containers:
+        - name: nfs-client-provisioner
+          image: registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: nfs-client-root
+              mountPath: /persistentvolumes
+          env:
+            - name: PROVISIONER_NAME
+              value: nfs-client
+            - name: NFS_SERVER
+              value: <NFS_SERVER_IP>  # REPLACE with your NFS server IP (e.g., 192.168.1.100)
+            - name: NFS_PATH
+              value: <NFS_EXPORT_PATH>  # REPLACE with your NFS export path (e.g., /nfs/exports/openshift-storage)
+            # Optional: Customize mount options
+            # - name: NFS_MOUNT_OPTIONS
+            #   value: "nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: nfs-client-root
+          nfs:
+            server: <NFS_SERVER_IP>  # REPLACE with your NFS server IP
+            path: <NFS_EXPORT_PATH>  # REPLACE with your NFS export path
+            # Optional: Specify mount options
+            # mountOptions:
+            #   - nfsvers=4.1
+            #   - rsize=1048576
+            #   - wsize=1048576
+
+# Made with Bob

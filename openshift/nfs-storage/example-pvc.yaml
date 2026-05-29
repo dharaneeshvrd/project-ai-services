@@ -1,0 +1,18 @@
+---
+# Example: PVC for Nginx using NFS storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-nfs-claim
+  namespace: default
+  labels:
+    app: test-nfs
+spec:
+  storageClassName: nfs-storage
+  accessModes:
+    - ReadWriteMany  # NFS supports ReadWriteMany - multiple pods can access
+  resources:
+    requests:
+      storage: 1Gi
+
+# Made with Bob

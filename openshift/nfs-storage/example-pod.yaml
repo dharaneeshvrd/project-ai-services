@@ -1,0 +1,70 @@
+---
+# Example: Simple Nginx pod using NFS storage
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-nfs-pod
+  namespace: default
+  labels:
+    app: test-nfs
+spec:
+  containers:
+  - name: nginx
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+    volumeMounts:
+    - name: nfs-storage
+      mountPath: /usr/share/nginx/html
+  volumes:
+  - name: nfs-storage
+    persistentVolumeClaim:
+      claimName: test-nfs-claim
+---
+# Example: Nginx deployment using NFS storage
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-nfs
+  namespace: default
+  labels:
+    app: nginx-nfs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-nfs
+  template:
+    metadata:
+      labels:
+        app: nginx-nfs
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: nfs-storage
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: nfs-storage
+        persistentVolumeClaim:
+          claimName: test-nfs-claim
+---
+# Service for Nginx
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-nfs
+  namespace: default
+spec:
+  selector:
+    app: nginx-nfs
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+  type: ClusterIP
+
+# Made with Bob

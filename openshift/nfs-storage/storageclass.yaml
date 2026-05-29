@@ -1,0 +1,30 @@
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-storage
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: nfs-client
+parameters:
+  # Archive PV data when PVC is deleted (creates archived-<pvc-name> directory)
+  archiveOnDelete: "false"
+# Reclaim policy: Retain or Delete
+# Retain: Keep PV and data after PVC deletion
+# Delete: Delete PV and data after PVC deletion
+reclaimPolicy: Retain
+# Allow volume expansion
+allowVolumeExpansion: true
+# Volume binding mode
+volumeBindingMode: Immediate
+# Mount options for NFS volumes
+mountOptions:
+  - nfsvers=4.1
+  - rsize=1048576
+  - wsize=1048576
+  - hard
+  - timeo=600
+  - retrans=2
+  - noresvport
+
+# Made with Bob
