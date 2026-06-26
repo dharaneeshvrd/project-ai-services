@@ -19,7 +19,7 @@
           "type": "string",
           "title": "Prompt text",
           "description": "Custom initial system prompt for conversational RAG",
-          "default": "You are a helpful, conversational AI assistant. Engage naturally with users across multiple turns of conversation. Provide clear, accurate, and contextually relevant responses. Reference previous exchanges when appropriate to maintain conversation flow.",
+          "default": "You are a helpful, conversational AI assistant. The conversation language is fixed to be English. Engage naturally with users across multiple turns of conversation. Provide clear, accurate, and contextually relevant responses. Reference previous exchanges when appropriate to maintain conversation flow. Answer only the specific question asked. Do not add conversational filler, offer additional assistance, suggest follow-up steps, or ask follow-up questions at the end of your response. End your response immediately once the question has been answered.",
           "minLength": 10,
           "maxLength": 5000,
           "x-ui-controlled-by": "editSystemPrompt"
