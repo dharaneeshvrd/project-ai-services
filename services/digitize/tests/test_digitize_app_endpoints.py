@@ -8,10 +8,10 @@ from fastapi.testclient import TestClient
 import digitize.app as digitize_app
 import digitize.api.v1.admin as jobs_router_module
 import digitize.api.v1.documents as documents_router_module
+import digitize.api.v1.jobs as jobs_router
 import digitize.utils.db as db_ops
 import digitize.db.connection as db_conn
 from digitize.models import JobStatus, OperationType, OutputFormat, ImportRequest
-from digitize.workers.concurrency import concurrency_manager
 
 
 @pytest.fixture
@@ -29,19 +29,24 @@ def digitize_test_client(monkeypatch, tmp_path, mock_db_operations):
         digitize=SimpleNamespace(
             digitized_docs_dir=digitized_dir,
             staging_dir=staging_dir,
-            digitization_concurrency_limit=2,
-            ingestion_concurrency_limit=1,
+            ingestion_queue_quota=10,
+            digitization_queue_quota=5,
+            heavy_doc_page_threshold=500,
+            conversion_poll_interval=2.0,
         ),
     )
 
     monkeypatch.setattr(digitize_app, "settings", fake_settings, raising=False)
     monkeypatch.setattr(digitize_app.dg_util, "settings", fake_settings, raising=False)
-    # Semaphores now live inside ConcurrencyManager — patch its is_locked and acquire/release
-    # so tests don't block on semaphore state from other tests.
-    monkeypatch.setattr(concurrency_manager, "is_locked", Mock(return_value=False))
-    monkeypatch.setattr(concurrency_manager, "acquire", AsyncMock())
-    monkeypatch.setattr(concurrency_manager, "release", Mock())
-    monkeypatch.setattr(digitize_app.dg_util, "has_active_jobs", Mock(return_value=(False, [])))
+    # Patch queue-based admission: return 0 queued tasks so gate always passes.
+    monkeypatch.setattr(jobs_router.db_manager, "get_queued_counts", Mock(return_value={"ingestion": 0, "digitization": 0}))
+    # Stub out conversion task creation so tests don't touch the DB.
+    monkeypatch.setattr(jobs_router.db_manager, "create_conversion_task", Mock(return_value=None))
+    # Stub out page count so tests don't need real files on disk.
+    monkeypatch.setattr(jobs_router, "get_document_page_count", Mock(return_value=0))
+    # Stub out pipeline background tasks so TestClient doesn't execute them.
+    monkeypatch.setattr(jobs_router, "_run_digitize", AsyncMock())
+    monkeypatch.setattr(jobs_router, "_run_ingest", AsyncMock())
     monkeypatch.setattr(digitize_app.dg_util, "generate_uuid", Mock(return_value="job-123"))
     monkeypatch.setattr(digitize_app.dg_util, "stage_upload_files", AsyncMock())
     monkeypatch.setattr(digitize_app.dg_util, "initialize_job_state", Mock(return_value={"sample.pdf": "doc-1"}))
@@ -138,8 +143,9 @@ class TestCreateJobs:
 
         assert response.status_code == 400
 
-    def test_rejects_when_ingestion_job_already_active(self, digitize_test_client, monkeypatch):
-        monkeypatch.setattr(digitize_app.dg_util, "has_active_jobs", Mock(return_value=(True, ["job-active"])))
+    def test_rejects_when_ingestion_queue_full(self, digitize_test_client, monkeypatch):
+        import digitize.api.v1.jobs as jobs_router
+        monkeypatch.setattr(jobs_router.db_manager, "get_queued_counts", Mock(return_value={"ingestion": 10, "digitization": 0}))
 
         response = digitize_test_client.post(
             "/v1/jobs?operation=ingestion",
@@ -147,7 +153,6 @@ class TestCreateJobs:
         )
 
         assert response.status_code == 429
-        assert "job-active" in response.text
 
     def test_rejects_invalid_pdf_file(self, digitize_test_client):
         response = digitize_test_client.post(

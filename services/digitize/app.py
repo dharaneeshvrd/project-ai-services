@@ -31,9 +31,11 @@ from digitize.settings import settings
 
 set_log_level(settings.common.app.log_level)
 
+import asyncio
+
 from digitize.db.connection import check_db_connection, close_db_connections
 import digitize.utils.jobs as dg_util
-from digitize.utils.recovery import recover_zombie_jobs
+from digitize.utils.recovery import recover_zombie_jobs, recover_conversion_tasks
 
 logger = get_logger("digitize_server")
 diagnostic_logger, stderr_monitor, signal_handler = setup_comprehensive_crash_handler(logger)
@@ -105,9 +107,29 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error(f"Error during zombie job recovery: {exc}", exc_info=True)
 
+    # Conversion task recovery on startup.
+    try:
+        ct_count = recover_conversion_tasks()
+        if ct_count > 0:
+            logger.info(
+                f"Recovered {ct_count} stale conversion task(s) from previous run"
+            )
+    except Exception as exc:
+        logger.error(f"Error during conversion task recovery: {exc}", exc_info=True)
+
+    # Start conversion dispatcher.
+    from digitize.workers.conversion_dispatcher import dispatch_loop
+    dispatcher_task = asyncio.create_task(dispatch_loop())
+    logger.info("✅ Conversion dispatcher started")
+
     yield
 
     # Shutdown.
+    dispatcher_task.cancel()
+    try:
+        await dispatcher_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Application shutting down...")
     try:
         close_db_connections()
