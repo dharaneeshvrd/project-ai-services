@@ -334,10 +334,11 @@ def query_vllm_payload(
         "frequency_penalty": 1.1,
         "temperature": temperature,
         "stop": stop_words,
-        "stream": stream
+        "stream": stream,
+        "chat_template_kwargs": {"thinking": True},
     }
     if stream:
-        payload["stream_options"] = {"include_usage": True}
+        payload["stream_options"] = {"include_usage": True, "include_reasoning": True}
     return headers, payload
 
 @retry_on_transient_error(max_retries=3, initial_delay=1.0, backoff_multiplier=2.0)
@@ -375,7 +376,7 @@ def query_vllm_non_stream(
 
     # Use requests for synchronous HTTP requests
     start_time = time.time()
-    response = misc_utils.SESSION.post(f"{llm_endpoint}/v1/chat/completions", json=payload, headers=headers, stream=False)
+    response = misc_utils.SESSION.post(f"{llm_endpoint}/v1/chat/completions", json=payload, headers=headers, stream=False, timeout=600)
     request_time = time.time() - start_time
     perf_stat_dict["inference_time"] = request_time
     response.raise_for_status()
@@ -383,6 +384,14 @@ def query_vllm_non_stream(
     if 'usage' in response_json:
         perf_stat_dict["completion_tokens"] = response_json['usage'].get('completion_tokens', 0)
         perf_stat_dict["prompt_tokens"] = response_json['usage'].get('prompt_tokens', 0)
+
+    choices = response_json.get('choices', [])
+    if choices:
+        message = choices[0].get('message', {})
+        # vLLM >= 0.23.0 renamed reasoning_content -> reasoning
+        reasoning = message.get('reasoning') or message.get('reasoning_content')
+        if reasoning:
+            logger.debug(f"Reasoning content: {reasoning}")
 
     return response_json
 

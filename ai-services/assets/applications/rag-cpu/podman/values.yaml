@@ -64,6 +64,8 @@ instruct:
     maxModelLen: 26208
     # @hidden
     maxBatchSize: 32
+    # @description Reasoning parser to enable thinking/reasoning mode (e.g. deepseek_r1, granite). Leave empty to disable.
+    reasoningParser: ""
 
 embedding:
   # @hidden

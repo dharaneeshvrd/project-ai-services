@@ -75,6 +75,10 @@ spec:
       - {{ .Values.instruct.model.name }}
       - --max-num-batched-tokens={{ .Values.instruct.model.maxNumBatchedTokens }}
       - --max-model-len={{ .Values.instruct.model.maxModelLen }}
+      {{- if .Values.instruct.model.reasoningParser }}
+      - --reasoning-parser={{ .Values.instruct.model.reasoningParser }}
+      - '--default-chat-template-kwargs={"thinking": true}'
+      {{- end }}
       - --port=8000
       livenessProbe:
         httpGet:
