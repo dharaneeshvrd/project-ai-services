@@ -15,6 +15,51 @@ logger = get_logger("LLM")
 
 is_debug = logger.isEnabledFor(logging.DEBUG)
 
+
+# Granite thinking format markers — used as fallback when vLLM's reasoning parser
+# fails to split reasoning out of content (e.g. auto-init of token IDs fails on CPU).
+# reasoning_end_str may include a transition phrase before </think>, so we use
+# </think> as the reliable closing boundary regardless.
+_THINK_START = "<think>"
+_THINK_END = "</think>"
+_RESPONSE_START = "[response]"
+_RESPONSE_END = "[/response]"
+
+
+def _extract_granite_reasoning(content: str) -> tuple[str | None, str]:
+    """
+    Fallback parser for Granite thinking format when vLLM's reasoning_parser
+    fails to populate the 'reasoning' field (e.g. auto-init of token IDs fails).
+
+    Handles all observed variants:
+      1. <think>...</think>[response]...[/response]   full thinking + wrapped answer
+      2. <think>...</think>...                        thinking only, no [response] wrapper
+      3. [response]...[/response]                     answer wrapped, no thinking block
+      4. ...[/response]                               only closing tag present
+
+    Returns (reasoning, cleaned_content). If no markers are found the original
+    content is returned unchanged with reasoning=None.
+    """
+    think_s = content.find(_THINK_START)
+    think_e = content.find(_THINK_END)
+    resp_s  = content.find(_RESPONSE_START)
+    resp_e  = content.find(_RESPONSE_END)
+
+    reasoning = None
+    if think_s != -1 and think_e != -1 and think_e > think_s:
+        reasoning = content[think_s + len(_THINK_START):think_e].strip()
+
+    if resp_s != -1 and resp_e != -1 and resp_e > resp_s:
+        content = content[resp_s + len(_RESPONSE_START):resp_e].strip()
+    elif think_e != -1:
+        content = content[think_e + len(_THINK_END):].strip()
+    elif resp_e != -1:
+        # only closing [/response] tag — strip it
+        content = content[:resp_e].strip()
+
+    return reasoning, content
+
+
 def apply_token_buffer(max_tokens: int, token_buffer_ratio: float | None = None, context: str = "LLM") -> int:
     """
     Apply token buffer to give LLM breathing room to respect prompt word limits.
@@ -388,8 +433,17 @@ def query_vllm_non_stream(
     choices = response_json.get('choices', [])
     if choices:
         message = choices[0].get('message', {})
-        # vLLM >= 0.23.0 renamed reasoning_content -> reasoning
+        # vLLM >= 0.23.0 uses 'reasoning'; older versions used 'reasoning_content'
         reasoning = message.get('reasoning') or message.get('reasoning_content')
+        if reasoning is None:
+            # Fallback: vLLM reasoning parser auto-init may fail on CPU builds —
+            # parse thinking markers directly out of content
+            raw_content = message.get('content') or ""
+            if _THINK_START in raw_content or _RESPONSE_START in raw_content or _RESPONSE_END in raw_content:
+                reasoning, clean_content = _extract_granite_reasoning(raw_content)
+                message['content'] = clean_content
+                message['reasoning'] = reasoning
+                logger.debug("Extracted reasoning via fallback inline parser")
         if reasoning:
             logger.debug(f"Reasoning content: {reasoning}")
 
