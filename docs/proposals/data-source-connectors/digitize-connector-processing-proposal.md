@@ -78,13 +78,12 @@ EACH SYNC TICK — _run_tick(connector_id, sync_seq)
 
 Phase 0 — ACQUIRE SYNC LOCK (only for APScheduler path)
   APScheduler entry point is _run_tick_wrapped():
-    1. Check _pending_deletions set → if present, exit silently (DELETE in progress)
+    1. Check DB: SELECT sync_status FROM connectors WHERE id = :connector_id
+       → 'delete_pending' → exit silently (DELETE in progress)
     2. try_acquire_sync_lock() — atomic UPDATE … WHERE sync_status != 'syncing'
        → None → already syncing → exit silently (no-op)
        → id   → lock acquired → proceed
-    3. Register asyncio.current_task() in _live_tasks[connector_id]
-       (synchronously before first await — needed for DELETE coordination)
-    4. Await _run_tick(connector_id, sync_seq)
+    3. Await _run_tick(connector_id, sync_seq)
 
   POST /sync path: lock already acquired in HTTP handler before dispatch
 
@@ -98,7 +97,7 @@ Phase 2 — LOAD KNOWN STATE
   SELECT DISTINCT checksum FROM connector_document_checksum
   → all_checksums (across all connectors — for cross-connector dedup)
 
-  [PHASE BOUNDARY: poll _pending_deletions; raise CancelledError if present]
+  [PHASE BOUNDARY: SELECT sync_status FROM connectors; raise CancelledError if 'delete_pending']
 
 Phase 3 — SCANNER CONNECT + FILE WALK
   loop = asyncio.get_running_loop()
@@ -114,7 +113,7 @@ Phase 3 — SCANNER CONNECT + FILE WALK
     [Yields: (remote_path, checksum) for ALL remote files, no dedup filtering]
     [May take minutes for large remote sources — event loop stays responsive]
 
-  [PHASE BOUNDARY: poll _pending_deletions; raise CancelledError if present]
+  [PHASE BOUNDARY: SELECT sync_status FROM connectors; raise CancelledError if 'delete_pending']
 
 Phase 4a — CLASSIFY + INGEST NEW FILES
   _classify(ingest_list, known_checksums, all_checksums):
@@ -129,21 +128,29 @@ Phase 4a — CLASSIFY + INGEST NEW FILES
         → new file: add to ingest_list
 
   _process_new_files(ingest_list, scanner):
-    For each (remote_path, checksum) in ingest_list (sequential, one at a time):
-      1. Create batch_dir = staging_base / f"{connector_id}-{job_id}-{batch_number}"
-      2. download: await loop.run_in_executor(None, scanner.download_to, remote_path, local_path)
-         [Blocking call to executor — thread holds file handle, transfers bytes over network]
-         [For large files: minutes of thread sleep in kernel (no CPU); event loop responsive]
-         [CancelledError can land at this await]
-      3. create_job(connector_id, checksum, staging_dir) → doc_id
-         [Async ingest pipeline: session creation, plugins, document_checksum insert]
-      4. add_connector_checksum_entry(connector_id, checksum, doc_id)
-         [INSERT … ON CONFLICT DO NOTHING]
+    batch_size = settings.digitize.connector.ingest_batch_size   [default 10; env CONNECTOR_INGEST_BATCH_SIZE]
+    Split ingest_list into consecutive batches of batch_size files.
+
+    For each batch (list of (remote_path, checksum)):
+      1. Create batch_dir = staging_base / f"{connector_id}-{batch_number}"
+      2. For each file in batch:
+           download: await loop.run_in_executor(None, scanner.download_to, remote_path, local_path)
+             [Blocking call to executor — thread holds file handle, transfers bytes over network]
+             [For large files: minutes of thread sleep in kernel (no CPU); event loop responsive]
+             [CancelledError can land at this await]
+      3. create_job(connector_id, batch_dir) → {filename → doc_id}
+         [Async ingest pipeline — most time-consuming step; ingests all files in batch_dir at once]
+      4. For each (checksum, doc_id) returned by create_job:
+           add_connector_checksum_entry(connector_id, checksum, doc_id)
+             [INSERT … ON CONFLICT DO NOTHING]
       5. finally: cleanup_staging_directory(batch_dir)
          [Always runs, even if CancelledError was raised]
       [CancelledError is explicitly re-raised to prevent swallowing]
 
-  [PHASE BOUNDARY: poll _pending_deletions; raise CancelledError if present]
+      [BATCH BOUNDARY: SELECT sync_status FROM connectors; raise CancelledError if 'delete_pending']
+      [Checked after create_job completes — catches DELETE that arrived during the slow ingest step]
+
+  [PHASE BOUNDARY: SELECT sync_status FROM connectors; raise CancelledError if 'delete_pending']
 
 Phase 4b — ORPHAN DETECTION + DELETION
   orphan_checksums = known_checksums − {checksum for (_, checksum) in scanned_files}
@@ -154,7 +161,7 @@ Phase 4b — ORPHAN DETECTION + DELETION
     if remaining == 0:
       DELETE /v1/documents/{doc_id}  [best-effort; 200/204/404 = success; errors logged and skipped]
 
-  [PHASE BOUNDARY: poll _pending_deletions; raise CancelledError if present]
+  [PHASE BOUNDARY: SELECT sync_status FROM connectors; raise CancelledError if 'delete_pending']
 
 Phase 5 — FINALIZE TICK
   UPDATE connector_sync_logs
@@ -178,7 +185,8 @@ CancelledError (DELETE in progress):
   Caught in _run_tick's except asyncio.CancelledError handler
   → _cancel_tick(sync_seq, connector_id)
     [UPDATE connector_sync_logs SET status='cancelled', finished_at=NOW()]
-    [UPDATE connectors SET sync_status='up to date']
+    [connectors.sync_status is NOT changed — stays 'delete_pending' as written by the handler]
+    [_run_teardown polls connector_sync_logs for the latest seq; 'cancelled' signals tick exited]
   → Re-raise CancelledError (must propagate; swallowing it breaks asyncio)
   → finally: scanner.close()
 
@@ -203,29 +211,29 @@ HTTP handler (fast path — returns before teardown completes):
   2. MARK DELETE_PENDING (DB write, committed before 204):
      UPDATE connectors SET sync_status = 'delete_pending' WHERE id = :connector_id
      → Committed to DB before proceeding (readers see 'delete_pending')
+     → Live tick reads this value at each phase boundary; raises CancelledError
+     → _cancel_tick() writes connector_sync_logs.status = 'cancelled' — the exit signal
 
-  3. SIGNAL DELETION (in-process, not DB):
-     _pending_deletions.add(connector_id)
-     → Live tick polls this set at each phase boundary
-     → Next phase boundary → raise CancelledError → tick exits cooperatively
-
-  4. DISPATCH BACKGROUND TEARDOWN:
+  3. DISPATCH BACKGROUND TEARDOWN:
      asyncio.create_task(_run_teardown(connector_id))
      → All remaining cleanup runs asynchronously
 
-  5. Return 204 No Content immediately
+  4. Return 204 No Content immediately
      [Response sent before teardown starts]
 
 _run_teardown(connector_id) — background asyncio.Task:
 
-  Step A — AWAIT LIVE TICK EXIT (if one exists):
-    task = _live_tasks.get(connector_id)
-    if task exists and not done:
-      → Try to await task with 30 s safety-net timeout
-      → Tick already sees _pending_deletions flag at phase boundary
+  Step A — AWAIT LIVE TICK EXIT (DB poll on connector_sync_logs):
+    Poll: SELECT status FROM connector_sync_logs
+          WHERE connector_id = :connector_id ORDER BY seq DESC LIMIT 1
+    Loop until latest log status IN ('cancelled', 'completed', 'failed')
+          OR no open log row exists (connector was idle — no tick was running)
+          OR 30 s safety-net timeout expires:
+      → Tick reads 'delete_pending' at next phase boundary
       → Tick raises CancelledError and exits cooperatively (no task.cancel() called)
+      → _cancel_tick() writes connector_sync_logs.status = 'cancelled' — poll sees it
       → Timeout fires if blocking executor call hangs > 30 s (e.g., stalled SFTP)
-        [Log warning, abandon task, proceed with DB cleanup]
+        [Log warning, proceed with DB cleanup regardless]
         [Executor thread continues running in background but doesn't block teardown]
 
   Step B — REMOVE APSCHEDULER JOB:
@@ -253,7 +261,6 @@ _run_teardown(connector_id) — background asyncio.Task:
     [Cascade auto-deletes connector_sync_logs rows]
 
   Step F — CLEANUP STAGING DIRECTORIES:
-    _pending_deletions.discard(connector_id)
     [glob staging/connectors/{connector_id}-* → rm -rf each match]
 
 INVARIANT AFTER TEARDOWN:
@@ -305,23 +312,25 @@ Pool sizing:
     loop.set_default_executor(ThreadPoolExecutor(max_workers=pool_size))
 
 ────────────────────────────────────────────────────────────────────────────────
-PHASE BOUNDARIES AND _pending_deletions POLLING
+PHASE BOUNDARIES AND DB STATUS POLLING
 ────────────────────────────────────────────────────────────────────────────────
 
 After each major phase, before the next await:
-  if connector_id in _pending_deletions:
+  connector = get_active_connector(connector_id)
+  if connector is None or connector.sync_status == 'delete_pending':
     raise CancelledError
 
 Effect:
-  • Deletion can land immediately after a phase completes (within µs)
+  • Works across all instances — DB is the single source of truth
+  • Deletion committed on any instance is visible to the tick on any other instance
   • If deletion arrives during executor call, coroutine cancels at that await
-  • Cancellation latency is determined by phase duration, not blocking call duration
+  • Cancellation latency is determined by phase duration + one DB round-trip
 
 Example latency:
-  • Between phases (connect → scan): microseconds
-  • Between scan → classify: microseconds
+  • Between phases (connect → scan): one DB round-trip (~1 ms on local network)
+  • Between scan → classify: one DB round-trip
   • During a download (executor call): as soon as that thread's TCP packet completes
-  • Safety net: 30 s timeout kills abandoned thread task if it hangs (e.g. stalled SFTP)
+  • Safety net: 30 s timeout in _run_teardown Step A if stalled SFTP never unblocks
 ```
 ![Delete Flow](delete-flow.svg)
 
@@ -478,14 +487,13 @@ Removes a connector and its runtime state. The HTTP response is **always `204` a
 Delete flow (API handler):
 
 1. Existence check — `GET active_connector(connector_id)` → `404` if not found.
-2. Mark connector as `delete_pending` — `UPDATE connectors SET sync_status = 'delete_pending'`. This is **synchronous and committed before the response is sent** so any concurrent reader sees the connector is being torn down. Any live tick polling `_pending_deletions` will raise `CancelledError` at the next await boundary.
-3. Signal cancellation via `signal_connector_delete(connector_id)` — adds `connector_id` to the in-process `_pending_deletions` set.
-4. Dispatch `_run_teardown(connector_id)` as an `asyncio.create_task` background task.
-5. Return `204 No Content` immediately.
+2. Mark connector as `delete_pending` — `UPDATE connectors SET sync_status = 'delete_pending'`. This is **synchronous and committed before the response is sent** so any concurrent reader on any instance sees the connector is being torn down. The live tick reads this value at each phase boundary and raises `CancelledError`; `_cancel_tick()` then writes `connector_sync_logs.status = 'cancelled'` as its exit signal.
+3. Dispatch `_run_teardown(connector_id)` as an `asyncio.create_task` background task.
+4. Return `204 No Content` immediately.
 
 `_run_teardown` (background, not awaited by the handler):
 
-1. Wait for the live tick to exit on its own — the tick polls `_pending_deletions` at every phase boundary and raises `CancelledError` when it sees the flag. `await_connector_tick_exit(connector_id)` waits on the task with a safety-net timeout (30 s). **`task.cancel()` is NOT called** — the tick exits cooperatively via `CancelledError` once it reaches the next await boundary.
+1. Wait for the live tick to exit — `await_connector_tick_exit(connector_id)` polls `connector_sync_logs` for the latest `seq` row, looping until `status` transitions to `'cancelled'`, `'completed'`, or `'failed'`, or no open row exists (connector was idle). Safety-net timeout: 30 s. **`task.cancel()` is NOT called** — the tick exits cooperatively via `CancelledError` once it reads `'delete_pending'` at the next phase boundary.
 2. Remove the APScheduler job (`remove_connector_job(connector_id)`) — no new tick can start from this point.
 3. Snapshot the connector's known checksums.
 4. Remove membership rows checksum by checksum; delete documents when the remaining reference count reaches zero.
@@ -501,20 +509,18 @@ DELETE /v1/connectors/{connector_id}   [API handler — fast path]
   │
   ├─ 2. UPDATE connectors SET sync_status = 'delete_pending'  ← committed before 204
   │        ← no 409 guard; accepted even if a tick is currently running
+  │        ← visible to the tick on any instance at its next phase boundary
   │
-  ├─ 3. signal_connector_delete(connector_id)
-  │        sets _pending_deletions.add(connector_id)
-  │        ← live tick polls this set; raises CancelledError at next await boundary
+  ├─ 3. asyncio.create_task(_run_teardown(connector_id))
   │
-  ├─ 4. asyncio.create_task(_run_teardown(connector_id))
-  │
-  └─ 5. return 204 No Content  ← response sent immediately
+  └─ 4. return 204 No Content  ← response sent immediately
                 ↓
          [background — _run_teardown]
            await_connector_tick_exit(connector_id)
+             → polls connector_sync_logs for latest seq status (safety-net timeout=30 s)
              → does NOT call task.cancel()
-             → await task (safety-net timeout=30 s; on timeout: abandon, log warning)
-             ← tick reaches CancelledError at next await boundary and exits cleanly
+             ← tick reads 'delete_pending', raises CancelledError, _cancel_tick() writes
+               connector_sync_logs.status='cancelled' — poll condition satisfied
            remove_connector_job(connector_id)
              ← no new tick can start from this point
            list checksums owned by this connector
@@ -1126,7 +1132,7 @@ Phase 5 — close tick record  [close_sync_log]
 
 #### 5.3.3 Detach — `DELETE /v1/connectors/{connector_id}`
 
-The API handler returns `204` immediately. All DB teardown runs inside `_run_teardown(connector_id)`, an `asyncio.Task` dispatched before the response is sent. **There is no `409` guard** — a DELETE is accepted even while a tick is running. The tick exits cooperatively by raising `CancelledError` once it polls `_pending_deletions` at the next await boundary; `task.cancel()` is never called.
+The API handler returns `204` immediately. All DB teardown runs inside `_run_teardown(connector_id)`, an `asyncio.Task` dispatched before the response is sent. **There is no `409` guard** — a DELETE is accepted even while a tick is running. The tick exits cooperatively by raising `CancelledError` once it reads `'delete_pending'` from the DB at the next phase boundary; `task.cancel()` is never called.
 
 ```text
 API handler (fast path — synchronous, no await on teardown)
@@ -1138,36 +1144,36 @@ Step 0 — existence check (DB read)
 
 Step 1 — mark delete_pending (DB write, committed before 204)
   UPDATE connectors SET sync_status = 'delete_pending' WHERE id = :connector_id
-  ← any reader seeing this row knows teardown is in flight
+  ← visible to the tick on any instance at its next phase boundary
   ← accepted regardless of the current sync_status value
 
-Step 2 — signal deletion (in-process registry, not a DB operation)
-  _pending_deletions.add(connector_id)
-  ← any live tick polls this set at each phase boundary; raises CancelledError
-
-Step 3 — dispatch background teardown (not a DB operation)
+Step 2 — dispatch background teardown
   asyncio.create_task(_run_teardown(connector_id))
 
-Step 4 — return 204 No Content immediately
+Step 3 — return 204 No Content immediately
 
 
 _run_teardown (background task — runs after 204 is sent)
 ────────────────────────────────────────────────────────────────────
 
-Step A — wait for in-flight tick to exit cooperatively (not a DB operation)
+Step A — wait for in-flight tick to exit (DB poll on connector_sync_logs)
   await_connector_tick_exit(connector_id)
-    → _pending_deletions already set (from Step 2); tick will raise CancelledError
-      at its next await boundary — task.cancel() is NOT called
-    → await task with safety-net timeout (30 s)
-    ← tick reaches CancelledError and exits cleanly
-    ← if safety-net fires: task is abandoned; log warning and proceed
+    Poll: SELECT status FROM connector_sync_logs
+          WHERE connector_id = :connector_id ORDER BY seq DESC LIMIT 1
+    Loop until status IN ('cancelled', 'completed', 'failed')
+          OR no open log row exists (connector was idle — no tick running)
+          OR 30 s safety-net timeout expires:
+      → Tick reads 'delete_pending' at next phase boundary — task.cancel() NOT called
+      → _cancel_tick() writes connector_sync_logs.status = 'cancelled'
+      ← poll sees 'cancelled'; loop exits
+    ← if safety-net fires: log warning and proceed with teardown regardless
 
   Note: any processing jobs the tick had already dispatched remain in their
   current state (accepted/in_progress). They are not cancelled here — that is
   deferred to the PR 8 enhancement. The connector row and all ownership records
   are fully removed regardless.
 
-Step B — remove APScheduler job (not a DB operation)
+Step B — remove APScheduler job
   scheduler.remove_job(connector_id)
   ← called after tick exit; prevents any new tick from starting during teardown
 
@@ -1188,8 +1194,7 @@ Step E — delete connector row
   DELETE FROM connectors WHERE id = :connector_id
   -- CASCADE deletes connector_sync_logs rows automatically.
 
-Step F — cleanup staging dirs (not a DB operation)
-  _pending_deletions.discard(connector_id)
+Step F — cleanup staging dirs
   glob staging/connectors/<connector_id>-* → rm -rf each match
 ```
 
@@ -1483,11 +1488,12 @@ _run_tick(connector_id)
 - **Overlapping ticks for the same connector are prevented at the DB level.** APScheduler's `max_instances=1` will not dispatch a new tick while `sync_status == 'syncing'`. `POST /sync` uses an atomic `UPDATE … WHERE sync_status != 'syncing' RETURNING id` — if no row is returned the request is a no-op and `_run_tick` is never called.
 - Cross-connector duplicate ingestion is handled by `ON CONFLICT (checksum, connector_id) DO NOTHING` on every `INSERT INTO connector_document_checksum`. No process-level lock is required.
 - `new_files` is updated live during staging and download.
-- Each file in a tick gets its own uniquely-named staging directory: `staging/connectors/<connector_id>-<job_id>-<batch_number>/`. The `job_id` is the UUID returned by `create_job()`, and `batch_number` is the zero-based index of the file within the tick's `ingest_list`. This naming makes every staging directory traceable to a specific connector, job, and position in the batch.
-- The staging directory is created immediately before `scanner.download()` and removed in the `finally` block after ingest, regardless of success or failure — before the next file is downloaded. No two batch directories exist simultaneously.
+- **`ingest_list` is processed in batches.** The batch size is controlled by `CONNECTOR_INGEST_BATCH_SIZE` (default `10`). Each batch shares one staging directory (`staging/connectors/<connector_id>-<batch_number>/`) and produces one `create_job()` call. This amortises the per-job overhead over multiple files and matches how the existing ingestion pipeline already handles multi-file uploads.
+- The staging directory is created before the first `download_to` in a batch and removed in the `finally` block after `create_job` returns, regardless of success or failure.
+- A **batch boundary DB poll** checks `connectors.sync_status` after each `create_job()` completes. `create_job()` is the most time-consuming step in the tick (it runs the full ingest pipeline); placing the poll immediately after it ensures a DELETE committed during that wait is detected before the next batch begins.
 - Download and ingest are `await`-able operations; the event loop is not blocked.
 - Fatal errors (unhandled exceptions escaping `_run_tick`) are caught by the top-level exception handler, which writes `failed: <error>` to `connectors.sync_status` and closes any open sync-log row.
-- Per-file failures are counted and summarised instead of failing the whole connector. Staging cleanup still runs for each file even when ingest fails.
+- Per-batch failures are counted and summarised instead of failing the whole connector. Staging cleanup still runs for each batch even when ingest fails.
 - Cross-connector duplicates are registered inline during Phase 3 classification — no deferred list.
 - **Phase 4b (orphan removal) always runs after Phase 4a (all new-file ingest jobs) completes.**
 
@@ -1635,14 +1641,6 @@ def _make_async_db_url() -> str:
 _scheduler: Optional[AsyncScheduler] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
 
-# In-process deletion registry — connector_ids currently undergoing teardown.
-# A live tick polls this set at phase boundaries and exits early when its id is present.
-_pending_deletions: set[str] = set()
-
-# Live-task registry — maps connector_id → currently-running asyncio.Task.
-# Populated synchronously in _run_tick_wrapped before the first await; cleared in finally.
-_live_tasks: dict[str, asyncio.Task] = {}
-
 
 def _get_scheduler() -> AsyncScheduler:
     if _scheduler is None:
@@ -1685,10 +1683,10 @@ async def remove_connector_job(connector_id: str) -> None:
 
 async def _run_tick_wrapped(connector_id: str) -> None:
     """APScheduler entry point. Acquires the DB sync lock before doing any work;
-    exits silently if the lock is unavailable (connector already syncing or pending delete).
-    Registers the running asyncio.Task in _live_tasks so DELETE can cancel it."""
-    # Early-exit if a DELETE is already in progress for this connector.
-    if connector_id in _pending_deletions:
+    exits silently if the lock is unavailable (connector already syncing or pending delete)."""
+    # Early-exit if a DELETE is already in progress — DB is the authoritative signal.
+    connector = get_active_connector(connector_id)
+    if connector is None or connector.sync_status == SyncStatus.DELETE_PENDING:
         return
 
     # Acquire the DB lock — this is the authoritative single gate shared with POST /sync.
@@ -1696,46 +1694,27 @@ async def _run_tick_wrapped(connector_id: str) -> None:
     if not acquired:
         return  # already syncing; APScheduler max_instances=1 is a secondary guard only
 
-    # Register task handle synchronously before the first await so await_connector_tick_exit
-    # can always find it in _live_tasks, even if DELETE arrives immediately after dispatch.
-    _live_tasks[connector_id] = asyncio.current_task()
-    try:
-        await _run_tick(connector_id)
-    finally:
-        _live_tasks.pop(connector_id, None)
+    await _run_tick(connector_id)
 
 
 async def await_connector_tick_exit(connector_id: str) -> None:
-    """Wait for the running tick to exit cooperatively via CancelledError.
-    Called by _run_teardown AFTER signal_connector_delete has already added
-    connector_id to _pending_deletions. Does NOT call task.cancel() — the tick
-    raises CancelledError on its own once it polls _pending_deletions at the
-    next await boundary.
+    """Poll connector_sync_logs until the latest tick row transitions out of 'started'.
+    Called by _run_teardown after the DELETE handler has committed 'delete_pending'.
+    Does NOT call task.cancel() — the tick exits cooperatively once it reads
+    'delete_pending' at the next phase boundary and _cancel_tick() writes 'cancelled'.
     Does not block the DELETE response — _run_teardown runs in a background task."""
-    task = _live_tasks.get(connector_id)
-    if task and not task.done():
-        try:
-            # No asyncio.shield — we want to wait for the real task, not a wrapper.
-            # Safety-net timeout guards against a scanner thread that hangs indefinitely
-            # (e.g. stalled SFTP connection). On timeout: log a warning, abandon the task,
-            # and let _run_teardown proceed with DB cleanup regardless.
-            await asyncio.wait_for(task, timeout=30.0)
-        except asyncio.CancelledError:
-            pass   # expected — tick exited via CancelledError after seeing _pending_deletions
-        except asyncio.TimeoutError:
-            logger.warning(
-                "await_connector_tick_exit: safety-net timeout for connector %r — "
-                "tick did not reach a CancelledError boundary within 30 s; "
-                "proceeding with teardown",
-                connector_id,
-            )
-
-
-async def signal_connector_delete(connector_id: str) -> None:
-    """Mark connector_id as pending deletion in the in-process registry.
-    Called synchronously (no await) in the DELETE handler before create_task.
-    The live tick polls _pending_deletions at phase boundaries and exits early."""
-    _pending_deletions.add(connector_id)
+    import asyncio, time
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        log_row = get_latest_sync_log(connector_id)   # SELECT … ORDER BY seq DESC LIMIT 1
+        if log_row is None or log_row.status != SyncStatus.STARTED:
+            return   # no open tick, or tick already wrote its terminal status
+        await asyncio.sleep(0.25)
+    logger.warning(
+        "await_connector_tick_exit: safety-net timeout for connector %r — "
+        "latest sync log still 'started' after 30 s; proceeding with teardown",
+        connector_id,
+    )
 ```
 
 **New dependencies** (add to `services/digitize/requirements.txt`):
@@ -1828,16 +1807,16 @@ If no row is returned, the endpoint returns `202` immediately without dispatchin
 
 The HTTP response (`204`) is returned immediately — the DELETE handler does not wait for tick cancellation or DB teardown. All cleanup runs inside `_run_teardown`, a background `asyncio.Task` dispatched by the handler before the response is sent.
 
-| Connector state at DELETE time | _run_teardown behaviour |
+| Connector state at DELETE time | `_run_teardown` behaviour |
 | --- | --- |
-| No live tick (`connector_id` not in `_live_tasks`) | Skip `await_connector_tick_exit()`; proceed directly to Step B |
-| Live tick exists | `await_connector_tick_exit()` → wait for cooperative CancelledError (safety-net 30 s) → proceed to Step B |
+| No open `connector_sync_logs` row with `status='started'` (connector was idle) | `await_connector_tick_exit()` returns immediately; proceed directly to Step B |
+| Open log row exists (`status='started'`) | Poll until `status` transitions to `'cancelled'` / `'completed'` / `'failed'` (safety-net 30 s) → proceed to Step B |
 
 In both cases the APScheduler job is removed in Step B after tick exit, so no new tick can start during teardown.
 
-#### 10.5.1 Tick exit — cooperative `CancelledError` via `_pending_deletions` polling
+#### 10.5.1 Tick exit — cooperative `CancelledError` via DB status polling
 
-`_run_tick` is an `asyncio` coroutine dispatched as an `asyncio.Task` on the same event loop as FastAPI. The exit mechanism relies on the tick polling `_pending_deletions` at each phase boundary and raising `CancelledError` when it sees the flag — **`Task.cancel()` is never called**. This works cleanly because the scanner operations that dominate tick duration are offloaded to a thread pool via `run_in_executor`, so the coroutine returns to the event loop between each phase and checks the flag before continuing.
+`_run_tick` is an `asyncio` coroutine dispatched as an `asyncio.Task` on the same event loop as FastAPI. The exit mechanism relies on the tick reading `connectors.sync_status` from the DB at each phase boundary and raising `CancelledError` when it sees `'delete_pending'` — **`Task.cancel()` is never called**. This works cleanly because the scanner operations that dominate tick duration are offloaded to a thread pool via `run_in_executor`, so the coroutine returns to the event loop between each phase and performs the DB check before continuing.
 
 **Why scanner calls must be offloaded to a thread pool**
 
@@ -1881,7 +1860,7 @@ async def _run_tick(connector_id: str) -> None:
         _complete_tick(sync_seq, connector_id)
     except asyncio.CancelledError:
         # Interrupted by DELETE — record a clean cancellation and propagate.
-        _cancel_tick(sync_seq, connector_id)   # writes status='cancelled', resets sync_status='up to date'
+        _cancel_tick(sync_seq, connector_id)   # writes connector_sync_logs.status='cancelled'; connectors.sync_status stays 'delete_pending'
         raise                                  # must re-raise; swallowing CancelledError breaks asyncio
     except Exception as exc:
         logger.error(f"Tick failed for connector {connector_id!r}: {exc}", exc_info=True)
@@ -1890,35 +1869,62 @@ async def _run_tick(connector_id: str) -> None:
         scanner.close()
 ```
 
-`_process_new_files` also wraps `scanner.download_to()` in `run_in_executor`:
+`_process_new_files` groups `ingest_list` into batches, downloads all files in a batch into a shared staging directory, then calls `create_job()` once per batch. A DB poll after each `create_job()` catches a DELETE that arrived during the slow ingest step.
 
 ```python
 async def _process_new_files(sync_seq, connector_id, scanner, ingest_list):
     loop = asyncio.get_running_loop()
     staging_base = settings.digitize.staging_dir / "connectors"
-    for batch_number, (remote_path, checksum) in enumerate(ingest_list):
-        job_id = generate_job_id()
-        batch_dir = staging_base / f"{connector_id}-{job_id}-{batch_number}"
+    batch_size = settings.digitize.connector.ingest_batch_size  # default 10
+
+    # Split ingest_list into consecutive batches of batch_size.
+    batches = [ingest_list[i:i + batch_size] for i in range(0, len(ingest_list), batch_size)]
+
+    for batch_number, batch in enumerate(batches):
+        batch_dir = staging_base / f"{connector_id}-{batch_number}"
         batch_dir.mkdir(parents=True, exist_ok=True)
+        # checksum_map: local_filename → checksum, built during download phase
+        checksum_map: dict[str, str] = {}
         try:
-            local_path = batch_dir / Path(remote_path).name
-            await loop.run_in_executor(None, scanner.download_to, remote_path, local_path)
-            doc_id = await create_job(connector_id, checksum, staging_dir=batch_dir)
-            add_connector_checksum_entry(connector_id, checksum, doc_id)
+            # 1. Download every file in this batch into the shared batch_dir.
+            for remote_path, checksum in batch:
+                local_path = batch_dir / Path(remote_path).name
+                await loop.run_in_executor(None, scanner.download_to, remote_path, local_path)
+                checksum_map[local_path.name] = checksum
+                # CancelledError raised at the await above propagates naturally.
+
+            # 2. Submit the whole batch to the ingest pipeline in one call.
+            #    create_job() is the most time-consuming step — runs conversion,
+            #    chunking, embedding, and vector-store indexing for all files.
+            doc_id_map = await create_job(connector_id, batch_dir)  # filename → doc_id
+
+            # 3. Register ownership for every successfully ingested file.
+            for filename, doc_id in doc_id_map.items():
+                checksum = checksum_map.get(filename)
+                if checksum and doc_id:
+                    add_connector_checksum_entry(connector_id, checksum, doc_id)
+
         except asyncio.CancelledError:
             raise  # let CancelledError propagate to _run_tick's except branch
         except Exception as exc:
-            logger.warning(f"Failed to ingest {remote_path!r}: {exc}")
-            _increment_failed(sync_seq)
+            logger.warning(f"Batch {batch_number} ingest failed for connector {connector_id!r}: {exc}")
+            _increment_failed(sync_seq, count=len(batch))
         finally:
             cleanup_staging_directory(batch_dir.name, staging_base, ignore_errors=True)
+
+        # Batch boundary DB poll — check for DELETE committed during create_job().
+        # Placed here (outside the try/finally) so it runs only on success or
+        # recoverable per-batch error, not on CancelledError (already propagated above).
+        connector = get_active_connector(connector_id)
+        if connector is None or connector.sync_status == SyncStatus.DELETE_PENDING:
+            raise asyncio.CancelledError
 ```
 
-`CancelledError` is explicitly re-raised inside `_process_new_files` so it is not accidentally swallowed by the per-file `except Exception` handler.
+`CancelledError` is explicitly re-raised inside the per-batch `except` block so it is not accidentally swallowed by the `except Exception` handler. The batch boundary poll after the `finally` block fires only when the batch completed (successfully or with a logged error) — it does not fire when `CancelledError` has already been raised and is propagating.
 
 **`_cancel_tick` and `_fail_tick` DB helpers**
 
-`_cancel_tick` writes `status='cancelled'` to the open `connector_sync_logs` row and resets `connectors.sync_status` to `'up to date'`.
+`_cancel_tick` writes `status='cancelled'` to the open `connector_sync_logs` row. `connectors.sync_status` is **not changed** — it remains `'delete_pending'` as set by the DELETE handler.
 
 `_fail_tick` writes `status='failed'` to the log row and sets `connectors.sync_status` to `'out of sync'`. The string `'out of sync'` matches the values permitted by the `connectors` data model — never `'failed: <message>'`, which would violate the DB `CHECK` constraint.
 
@@ -1926,15 +1932,9 @@ async def _process_new_files(sync_seq, connector_id, scanner, ingest_list):
 
 If `CancelledError` fires while `scanner.download_to()` is running inside the executor, the executor thread continues until the blocking call returns naturally — the cancellation only stops the coroutine from `await`-ing the result. The `finally` block in `_process_new_files` runs immediately after the `await` unblocks and removes the in-progress batch directory unconditionally, so no orphaned staging files are left behind.
 
-**Live-task registry and race-free task handle registration**
-
-`_run_tick_wrapped` registers `asyncio.current_task()` into `_live_tasks` **synchronously before the first `await`** — this guarantees the handle is visible to `await_connector_tick_exit()` from the very first event-loop iteration the coroutine runs, closing the narrow window where a DELETE could arrive between dispatch and registration. The entry is removed in the `finally` block after `_run_tick` returns or raises.
-
-`POST /sync` dispatches `asyncio.create_task(_run_tick(connector_id))` directly — it does not go through `_run_tick_wrapped` and therefore does not register in `_live_tasks`. Since `POST /sync` only fires when there is no live tick (the DB lock would be unavailable otherwise), this is not a gap.
-
 **Ordering guarantee**
 
-`remove_connector_job()` is called (Step B of `_run_teardown`) **after** `await_connector_tick_exit()` returns. This closes the race window: if `remove_job` were called first, APScheduler could theoretically dispatch one more tick before the in-flight tick had exited. By waiting for the cooperative CancelledError first and only removing the job once the coroutine has fully exited, no new tick can start during teardown.
+`remove_connector_job()` is called (Step B of `_run_teardown`) **after** `await_connector_tick_exit()` returns. This closes the race window: if `remove_job` were called first, APScheduler could theoretically dispatch one more tick before the in-flight tick had exited. By waiting until `connector_sync_logs.status` transitions out of `'started'` and only then removing the APScheduler job, no new tick can start during teardown.
 
 **Effective cancellation latency**
 
@@ -1989,13 +1989,11 @@ loop.set_default_executor(ThreadPoolExecutor(max_workers=pool_size))
 
 A cancelled executor thread cannot be forcibly stopped — it runs to completion in the background. For S3 this means the in-flight `download_fileobj` call finishes its current TCP transfer. For SFTP the current `md5sum` or file-get runs to its natural end. This is the same behaviour as the old thread-per-connector poller checking a `_stop_event` flag between files — the current blocking operation always completes. The `finally` block in `_process_new_files` handles staging cleanup, and the DELETE response is not held waiting for the thread.
 
-**Limitations**
-
-- The live-task registry is **process-local**. Sufficient for single-instance deployment (§10.6). When scaling to multiple instances, supplement with a `cancellation_requested` boolean column on `connectors` that each tick polls at phase boundaries — a DELETE on any instance reaches the tick on any other instance via the next DB read.
-
 ### 10.6 Multi-Instance Consideration
 
 The current deployment runs a **single `digitize` instance**. The `AsyncSQLAlchemyDataStore` already persists jobs to Postgres, which is the prerequisite for scaling. When multiple instances are needed, add an `AsyncpgEventBroker` to the scheduler construction (§9.2) — this enables `LISTEN`/`NOTIFY`-based coordination so instances are notified of job changes in real time rather than polling. APScheduler's data-store advisory locks will then prevent duplicate ticks across instances with no other infrastructure changes required.
+
+The cancellation and teardown coordination is **already multi-instance safe** by design: the DELETE handler writes `sync_status = 'delete_pending'` to Postgres before returning `204`, and each tick reads that column from the DB at every phase boundary. A DELETE arriving on any instance is immediately visible to the tick running on any other instance at its next phase boundary poll. `_run_teardown` similarly polls `connector_sync_logs` rather than any process-local state, so it too works correctly regardless of which instance the tick ran on.
 
 ---
 
@@ -2131,17 +2129,19 @@ Each PR is independently testable. Based on the current implementation in the Di
 **Expected files:** `services/digitize/connectors/scheduler.py`, app lifespan integration, manual sync route wiring
 
 **What still has to be implemented:**
-- Add a scheduler module (`scheduler.py`) containing: module-level `None` handles for `_scheduler`, `_loop`; `_pending_deletions` set; `_live_tasks` dict; `_get_scheduler()` guard; `register_connector_job(fire_immediately=)`, `remove_connector_job()`, `_run_tick_wrapped()`, `await_connector_tick_exit()`, `signal_connector_delete()`.
-- `_run_tick_wrapped()` must call `try_acquire_sync_lock()` on entry (DB lock gate for APScheduler path) and register `asyncio.current_task()` in `_live_tasks` **before** the first `await`.
+- Add a scheduler module (`scheduler.py`) containing: module-level `None` handles for `_scheduler`, `_loop`; `_get_scheduler()` guard; `register_connector_job(fire_immediately=)`, `remove_connector_job()`, `_run_tick_wrapped()`, `await_connector_tick_exit()`.
+- `_run_tick_wrapped()` must read `connectors.sync_status` from the DB on entry and exit silently if it is `'delete_pending'`; then call `try_acquire_sync_lock()` (DB lock gate for APScheduler path). No `_live_tasks` registration needed.
+- `await_connector_tick_exit()` polls `connector_sync_logs` (latest `seq` row) until `status != 'started'` or the 30 s safety-net expires. No task handle needed.
+- Add `SyncStatus.DELETE_PENDING = "delete_pending"` and `SyncStatus.CANCELLED = "cancelled"` to [`connectors/models.py`](services/digitize/connectors/models.py).
 - Integrate scheduler startup into [`lifespan()`](services/digitize/app.py:47): construct engine/data store/scheduler inside the hook; write back to module globals via `scheduler_module._scheduler = sched`; call `register_connector_job(..., fire_immediately=False)` for recovery (no restart storm).
 - Call `register_connector_job(..., fire_immediately=True)` from [`create_connector()`](services/digitize/api/v1/connectors.py:74) after the DB insert.
-- Add `_run_teardown()` to the scheduler module: calls `await_connector_tick_exit()`, `remove_connector_job()`, checksum cleanup, connector row delete, staging sweep, `_pending_deletions.discard()`.
+- Add `_run_teardown()` to the scheduler module: calls `await_connector_tick_exit()`, `remove_connector_job()`, checksum cleanup, connector row delete, staging sweep.
 - Implement `POST /v1/connectors/{connector_id}/sync`: call `try_acquire_sync_lock()` in handler; if lock acquired, call `open_new_sync_log()`, then `asyncio.create_task(_run_tick(connector_id))`. **No APScheduler involvement.**
 - Size the `ThreadPoolExecutor` in `lifespan()` based on connector count (see §10.5.1 pool sizing).
 - Add scheduler and lifespan integration tests.
 
 **Verification notes:**
-- No APScheduler usage, `AsyncScheduler`, `register_connector_job`, `remove_connector_job`, `signal_connector_delete`, `await_connector_tick_exit`, or `try_acquire_sync_lock` implementation exists in the current codebase.
+- No APScheduler usage, `AsyncScheduler`, `register_connector_job`, `remove_connector_job`, `await_connector_tick_exit`, or `try_acquire_sync_lock` implementation exists in the current codebase.
 - [`lifespan()`](services/digitize/app.py:47) currently performs DB setup and zombie-job recovery only; it does not register connector jobs.
 - [`connectors.py`](services/digitize/api/v1/connectors.py) does not expose a manual sync endpoint yet.
 
@@ -2151,7 +2151,7 @@ Each PR is independently testable. Based on the current implementation in the Di
 
 ### PR 9 — Live-code DELETE Fire-and-Forget Wiring ❌ Not implemented
 
-**Prerequisite:** PR 7 (scheduler module) must be merged first — `signal_connector_delete`, `_run_teardown`, and `await_connector_tick_exit` must exist before the handler can call them.
+**Prerequisite:** PR 7 (scheduler module) must be merged first — `_run_teardown` and `await_connector_tick_exit` must exist before the handler can call them.
 
 **Context:**
 
@@ -2161,9 +2161,7 @@ The current [`delete_connector()`](services/digitize/api/v1/connectors.py:212) h
 
 1. **Remove the `409 Conflict` guard** — delete the `if sync_status == 'syncing'` check entirely. The DELETE is accepted unconditionally (beyond the existence check).
 
-2. **Add `signal_connector_delete` call** — immediately after the `mark_connector_delete_pending` DB write and before `asyncio.create_task`, call `signal_connector_delete(connector_id)` (sets `_pending_deletions.add(connector_id)`) so any live tick sees the flag at the next await boundary and raises `CancelledError`.
-
-3. **Move all teardown logic into scheduler's `_run_teardown`** — remove the inline checksum loop, `delete_active_connector`, and staging sweep from the handler body. This logic belongs inside `_run_teardown(connector_id)` in the scheduler module (§5.3.3), which calls `await_connector_tick_exit()` (not `cancel_connector_tick`) then `remove_connector_job()` before the DB cleanup.
+2. **Move all teardown logic into scheduler's `_run_teardown`** — remove the inline checksum loop, `delete_active_connector`, and staging sweep from the handler body. This logic belongs inside `_run_teardown(connector_id)` in the scheduler module (§5.3.3), which calls `await_connector_tick_exit()` then `remove_connector_job()` before the DB cleanup.
 
 4. **Dispatch background task** — replace the removed teardown body with:
    ```python
@@ -2173,12 +2171,12 @@ The current [`delete_connector()`](services/digitize/api/v1/connectors.py:212) h
 
 5. **Update tests** — update [`test_connector_endpoints.py`](services/digitize/tests/test_connector_endpoints.py) to:
    - Assert there is **no** `409` response for any `sync_status` value.
-   - Assert `signal_connector_delete` is called before the `204` is returned.
    - Assert `_run_teardown` is dispatched as a background task.
-   - Verify the connector is marked `delete_pending` before teardown completes.
+   - Verify the connector is marked `delete_pending` in the DB before teardown completes.
+   - Verify `await_connector_tick_exit` polls `connector_sync_logs` and returns once `status='cancelled'`.
 
 **Verification notes:**
-- [`delete_connector()`](services/digitize/api/v1/connectors.py:212) currently performs teardown synchronously, contains a `409` guard, and does not call `signal_connector_delete` or `await_connector_tick_exit` — those do not exist yet.
+- [`delete_connector()`](services/digitize/api/v1/connectors.py:212) currently performs teardown synchronously, contains a `409` guard, and does not call `await_connector_tick_exit` — that does not exist yet.
 - The `delete_pending` DB write (Step 1 in §3.3) is specified in the proposal but not yet implemented in code — implement it as part of this PR alongside the teardown wiring.
 
 ---
