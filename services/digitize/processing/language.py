@@ -102,8 +102,8 @@ def detect_document_language(data) -> str:
         logger.debug(f"Detected languages: {detected_languages}, using: {most_common_lang}")
 
         # Check if the detected language is supported
-        # Use the keys from _TO_SENTENCE_SPLITTER mapping which contains all supported languages
-        supported_langs = list(LanguageCodes._TO_SENTENCE_SPLITTER.keys())
+        # Use the keys from _TO_SPACY_LANG mapping which contains all supported languages
+        supported_langs = list(LanguageCodes._TO_SPACY_LANG.keys())
         if most_common_lang not in supported_langs:
             logger.warning(f"Detected language '{most_common_lang}' is not supported, falling back to '{default_lang}'")
             return default_lang

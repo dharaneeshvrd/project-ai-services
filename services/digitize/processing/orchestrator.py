@@ -16,9 +16,8 @@ import time
 from pathlib import Path
 
 from docling_core.types.doc.document import DoclingDocument
-from sentence_splitter import SentenceSplitter
-
-from common.lang_utils import LanguageCodes, to_sentence_splitter_lang
+from common.lang_utils import LanguageCodes, to_spacy_lang
+from common.spacy_utils import split_sentences
 from common.misc_utils import (
     get_logger,
     get_utc_timestamp,
@@ -64,7 +63,7 @@ def split_text_into_token_chunks(text, emb_endpoint, max_tokens=512, overlap=50,
     Returns:
         List of text chunks
     """
-    sentences = SentenceSplitter(language=language).split(text)
+    sentences = split_sentences(text, lang=language)
     chunks = []
     current_chunk = []
     current_token_count = 0
@@ -312,9 +311,9 @@ def chunk_single_file(input_path, table_json_path, out_path, emb_endpoint, max_t
     """
     t0 = time.time()
     try:
-        sentence_splitter_lang = to_sentence_splitter_lang(language)
-        text_chunk_json, text_chunk_time = chunk_text(input_path, out_path, emb_endpoint, max_tokens, doc_id, sentence_splitter_lang)
-        table_chunk_json, table_chunk_time = chunk_tables(table_json_path, out_path, emb_endpoint, max_tokens, doc_id, sentence_splitter_lang)
+        spacy_lang = to_spacy_lang(language)
+        text_chunk_json, text_chunk_time = chunk_text(input_path, out_path, emb_endpoint, max_tokens, doc_id, spacy_lang)
+        table_chunk_json, table_chunk_time = chunk_tables(table_json_path, out_path, emb_endpoint, max_tokens, doc_id, spacy_lang)
         total_time = time.time() - t0
         return text_chunk_json, table_chunk_json, total_time
     except Exception as e:

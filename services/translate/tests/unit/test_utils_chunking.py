@@ -4,7 +4,7 @@ Unit tests for translate/utils/chunking.py — token-based document chunker.
 
 import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from translate.models import TranslationChunk
 from translate.utils.chunking import (
@@ -160,14 +160,14 @@ class TestBuildTranslationChunks:
     @pytest.mark.asyncio
     async def test_empty_text_returns_empty(self):
         with patch("translate.utils.chunking.get_chunk_token_budget", return_value=1000), \
-             patch("translate.utils.chunking.to_sentence_splitter_lang", return_value="en"):
+             patch("translate.utils.chunking.to_spacy_lang", return_value="en"):
             chunks = await build_translation_chunks("", llm_endpoint="http://vllm:8000")
         assert chunks == []
 
     @pytest.mark.asyncio
     async def test_whitespace_only_text_returns_empty(self):
         with patch("translate.utils.chunking.get_chunk_token_budget", return_value=1000), \
-             patch("translate.utils.chunking.to_sentence_splitter_lang", return_value="en"):
+             patch("translate.utils.chunking.to_spacy_lang", return_value="en"):
             chunks = await build_translation_chunks("   \n\n   ", llm_endpoint="http://vllm:8000")
         assert chunks == []
 
@@ -176,7 +176,7 @@ class TestBuildTranslationChunks:
         text = "This is a short paragraph."
 
         with patch("translate.utils.chunking.get_chunk_token_budget", return_value=1000), \
-             patch("translate.utils.chunking.to_sentence_splitter_lang", return_value="en"), \
+             patch("translate.utils.chunking.to_spacy_lang", return_value="en"), \
              patch("translate.utils.chunking._count_tokens", new=AsyncMock(return_value=5)):
             chunks = await build_translation_chunks(text, llm_endpoint="http://vllm:8000")
 
@@ -191,7 +191,7 @@ class TestBuildTranslationChunks:
 
         # Both blocks together fit inside budget=100
         with patch("translate.utils.chunking.get_chunk_token_budget", return_value=100), \
-             patch("translate.utils.chunking.to_sentence_splitter_lang", return_value="en"), \
+             patch("translate.utils.chunking.to_spacy_lang", return_value="en"), \
              patch("translate.utils.chunking._count_tokens", new=AsyncMock(return_value=5)):
             chunks = await build_translation_chunks(text, llm_endpoint="http://vllm:8000")
 
@@ -209,13 +209,10 @@ class TestBuildTranslationChunks:
         async def fake_count(text, endpoint):
             return token_map.get(text, 5)
 
-        mock_splitter = MagicMock()
-        mock_splitter.split.return_value = ["Oversized block text."]
-
         with patch("translate.utils.chunking.get_chunk_token_budget", return_value=100), \
-             patch("translate.utils.chunking.to_sentence_splitter_lang", return_value="en"), \
+             patch("translate.utils.chunking.to_spacy_lang", return_value="en"), \
              patch("translate.utils.chunking._count_tokens", side_effect=fake_count), \
-             patch("translate.utils.chunking.SentenceSplitter", return_value=mock_splitter), \
+             patch("translate.utils.chunking.split_sentences", return_value=["Oversized block text."]), \
              patch("translate.utils.chunking._pack_sentences_greedily",
                    new=AsyncMock(return_value=[
                        TranslationChunk(index=1, text="Oversized block text.", token_count=200)
@@ -237,9 +234,8 @@ class TestBuildTranslationChunks:
             return 5
 
         with patch("translate.utils.chunking.get_chunk_token_budget", return_value=100), \
-             patch("translate.utils.chunking.to_sentence_splitter_lang", return_value="en"), \
-             patch("translate.utils.chunking._count_tokens", side_effect=fake_count), \
-             patch("translate.utils.chunking.SentenceSplitter") as mock_ss:
+             patch("translate.utils.chunking.to_spacy_lang", return_value="en"), \
+             patch("translate.utils.chunking._count_tokens", side_effect=fake_count):
             chunks = await build_translation_chunks(text, llm_endpoint="http://vllm:8000")
 
         # Table chunk should be present and NOT sentence-split
@@ -252,10 +248,9 @@ class TestBuildTranslationChunks:
         text = "\n\n".join([f"Paragraph {i}." for i in range(5)])
 
         with patch("translate.utils.chunking.get_chunk_token_budget", return_value=20), \
-             patch("translate.utils.chunking.to_sentence_splitter_lang", return_value="en"), \
+             patch("translate.utils.chunking.to_spacy_lang", return_value="en"), \
              patch("translate.utils.chunking._count_tokens", new=AsyncMock(return_value=8)), \
-             patch("translate.utils.chunking.SentenceSplitter") as mock_ss:
-            mock_ss.return_value.split.return_value = ["A sentence."]
+             patch("translate.utils.chunking.split_sentences", return_value=["A sentence."]):
             chunks = await build_translation_chunks(text, llm_endpoint="http://vllm:8000")
 
         indices = [c.index for c in chunks]
@@ -266,11 +261,8 @@ class TestBuildTranslationChunks:
         text = "Ein einfacher Paragraph."
 
         with patch("translate.utils.chunking.get_chunk_token_budget", return_value=1000), \
-             patch("translate.utils.chunking.to_sentence_splitter_lang", return_value="de") as mock_lang, \
-             patch("translate.utils.chunking._count_tokens", new=AsyncMock(return_value=5)), \
-             patch("translate.utils.chunking.SentenceSplitter") as mock_ss_cls:
-            mock_ss_cls.return_value = MagicMock()
-            mock_ss_cls.return_value.split.return_value = [text]
+             patch("translate.utils.chunking.to_spacy_lang", return_value="de") as mock_lang, \
+             patch("translate.utils.chunking._count_tokens", new=AsyncMock(return_value=5)):
 
             await build_translation_chunks(
                 text, llm_endpoint="http://vllm:8000", source_language_code="DE"
@@ -283,10 +275,8 @@ class TestBuildTranslationChunks:
         text = "A simple paragraph."
 
         with patch("translate.utils.chunking.get_chunk_token_budget", return_value=1000), \
-             patch("translate.utils.chunking.to_sentence_splitter_lang", return_value="en") as mock_lang, \
-             patch("translate.utils.chunking._count_tokens", new=AsyncMock(return_value=5)), \
-             patch("translate.utils.chunking.SentenceSplitter") as mock_ss_cls:
-            mock_ss_cls.return_value = MagicMock()
+             patch("translate.utils.chunking.to_spacy_lang", return_value="en") as mock_lang, \
+             patch("translate.utils.chunking._count_tokens", new=AsyncMock(return_value=5)):
 
             await build_translation_chunks(text, llm_endpoint="http://vllm:8000", source_language_code=None)
 

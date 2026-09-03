@@ -11,21 +11,21 @@ _language_detector = None
 # Language codes class
 class LanguageCodes:
     """Language codes as class attributes for easy access without dictionary keys.
-    
-    Provides both uppercase ISO codes (for LLM APIs) and lowercase codes (for sentence splitter).
+
+    Provides both uppercase ISO codes (for LLM APIs) and lowercase codes (for spaCy).
     """
     ENGLISH = "EN"
     GERMAN = "DE"
     ITALIAN = "IT"
     FRENCH = "FR"
-    
-    # Mapping from uppercase ISO codes to SentenceSplitter language codes
+
+    # Mapping from uppercase ISO codes to spaCy language codes (ISO-639-1 lowercase)
     # Using class variables to avoid duplication
-    _TO_SENTENCE_SPLITTER = {
+    _TO_SPACY_LANG = {
         ENGLISH: "en",
         GERMAN: "de",
         ITALIAN: "it",
-        FRENCH: "fr"
+        FRENCH: "fr",
     }
 
     _SUPPORTED: frozenset = frozenset({"EN", "DE", "IT", "FR"})
@@ -33,23 +33,25 @@ class LanguageCodes:
     @classmethod
     def supported_languages(cls) -> frozenset:
         """Get set of supported language codes.
-        
+
         Returns:
             frozenset of supported language codes (e.g., {'EN', 'DE', 'IT', 'FR'})
         """
         return cls._SUPPORTED
-    
-def to_sentence_splitter_lang(lingua_code: str) -> str:
-    """
-    Convert lingua ISO code to SentenceSplitter language code.
-    
+
+
+def to_spacy_lang(lingua_code: str) -> str:
+    """Convert a lingua ISO code to a lowercase spaCy language code.
+
     Args:
         lingua_code: Lingua ISO code (e.g., 'EN', 'DE', 'IT', 'FR')
-        
+
     Returns:
-        SentenceSplitter language code (e.g., 'en', 'de', 'it', 'fr')
+        spaCy language code (e.g., 'en', 'de', 'it', 'fr').
+        Falls back to 'en' for unrecognised codes.
     """
-    return LanguageCodes._TO_SENTENCE_SPLITTER.get(lingua_code, 'en')
+    return LanguageCodes._TO_SPACY_LANG.get(lingua_code, "en")
+
 
 def get_prompt_for_language(lang: str, prompts: dict[str, str]) -> str:
     """
