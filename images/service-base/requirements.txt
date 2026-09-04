@@ -107,13 +107,9 @@ rtree==1.4.1
 safetensors==0.7.0
 scipy==1.17.1
 semchunk==3.2.5
+sentence-splitter==1.4
 spacy==3.8.7
-# The model wheels are py3-none-any — pure Python, no compilation, needed for initial 4 languages
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
-https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl
-https://github.com/explosion/spacy-models/releases/download/it_core_news_sm-3.8.0/it_core_news_sm-3.8.0-py3-none-any.whl
-https://github.com/explosion/spacy-models/releases/download/fr_core_news_sm-3.8.0/fr_core_news_sm-3.8.0-py3-none-any.whl
-# Japanese model (py3-none-any) — requires sudachipy (built in prebuilder) + sudachidict-core
+# Japanese model only — requires sudachipy (built in prebuilder) + sudachidict-core
 https://github.com/explosion/spacy-models/releases/download/ja_core_news_sm-3.8.0/ja_core_news_sm-3.8.0-py3-none-any.whl
 sudachidict-core==20260723
 sentry-sdk==2.55.0

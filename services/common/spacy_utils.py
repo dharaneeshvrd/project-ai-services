@@ -1,20 +1,16 @@
 """
-spaCy-backed sentence splitter utility.
+Sentence splitting utility.
 
-Provides a single entry point — ``split_sentences`` — that mirrors the
-``SentenceSplitter.split()`` contract: accepts a text string and a two-letter
-lowercase language code and returns a list of non-empty sentence strings.
+Provides a single entry point — ``split_sentences`` — that accepts a text
+string and a two-letter lowercase language code and returns a list of
+non-empty sentence strings.
 
-
-Supported language codes → spaCy model names
----------------------------------------------
-en  →  en_core_web_sm
-de  →  de_core_news_sm
-it  →  it_core_news_sm
-fr  →  fr_core_news_sm
-ja  →  ja_core_news_sm  (requires sudachipy + sudachidict-core)
-
-Any unrecognised code falls back to the English model.
+Routing logic
+-------------
+* Japanese (``"ja"``) — uses spaCy ``ja_core_news_sm`` (requires sudachipy
+  and sudachidict-core).
+* All other languages — uses ``sentence-splitter`` (lightweight, rule-based),
+  falling back to ``"en"`` for unrecognised codes.
 """
 
 from __future__ import annotations
@@ -23,6 +19,7 @@ import threading
 from typing import Dict
 
 import spacy
+from sentence_splitter import SentenceSplitter
 from spacy.language import Language
 
 from common.misc_utils import get_logger
@@ -30,51 +27,76 @@ from common.misc_utils import get_logger
 logger = get_logger("spacy_utils")
 
 # ---------------------------------------------------------------------------
-# Language-code → model name mapping
+# spaCy — Japanese only
 # ---------------------------------------------------------------------------
 
-_LANG_TO_MODEL: Dict[str, str] = {
-    "en": "en_core_web_sm",
-    "de": "de_core_news_sm",
-    "it": "it_core_news_sm",
-    "fr": "fr_core_news_sm",
-    # Japanese requires sudachipy + sudachidict-core as extra pip dependencies.
-    "ja": "ja_core_news_sm",
-}
-
-_DEFAULT_LANG = "en"
-
-# ---------------------------------------------------------------------------
-# Per-process model cache (thread-safe)
-# ---------------------------------------------------------------------------
+_JA_MODEL = "ja_core_news_sm"
+_JA_LANG = "ja"
 
 _cache: Dict[str, Language] = {}
 _cache_lock = threading.Lock()
 
 
-def _load_model(lang: str) -> Language:
-    """Load and cache a spaCy model for *lang*, returning the cached copy on repeat calls."""
+def _load_ja_model() -> Language:
+    """Load and cache the Japanese spaCy model."""
     with _cache_lock:
-        if lang not in _cache:
-            model_name = _LANG_TO_MODEL.get(lang, _LANG_TO_MODEL[_DEFAULT_LANG])
-            logger.debug(f"Loading spaCy model '{model_name}' for language '{lang}'")
-            # Disable components we don't need — only the sentencizer is required.
-            nlp = spacy.load(model_name, exclude=["ner", "lemmatizer", "morphologizer"])
+        if _JA_LANG not in _cache:
+            logger.debug(f"Loading spaCy model '{_JA_MODEL}' for language 'ja'")
+            nlp = spacy.load(_JA_MODEL, exclude=["ner", "lemmatizer", "morphologizer"])
             if "sentencizer" not in nlp.pipe_names and "senter" not in nlp.pipe_names and "parser" not in nlp.pipe_names:
                 nlp.add_pipe("sentencizer")
-            _cache[lang] = nlp
-        return _cache[lang]
+            _cache[_JA_LANG] = nlp
+        return _cache[_JA_LANG]
 
+
+def _split_with_spacy_ja(text: str) -> list[str]:
+    """Split Japanese text into sentences using spaCy."""
+    nlp = _load_ja_model()
+    doc = nlp(text)
+    return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+
+
+# ---------------------------------------------------------------------------
+# sentence-splitter — all non-Japanese languages
+# ---------------------------------------------------------------------------
+
+_SENTENCE_SPLITTER_LANGS = {"en", "de", "it", "fr"}
+_DEFAULT_LANG = "en"
+
+_splitter_cache: Dict[str, SentenceSplitter] = {}
+_splitter_cache_lock = threading.Lock()
+
+
+def _get_splitter(lang: str) -> SentenceSplitter:
+    """Return a cached ``SentenceSplitter`` instance for *lang*."""
+    resolved = lang if lang in _SENTENCE_SPLITTER_LANGS else _DEFAULT_LANG
+    with _splitter_cache_lock:
+        if resolved not in _splitter_cache:
+            logger.debug(f"Creating SentenceSplitter for language '{resolved}'")
+            _splitter_cache[resolved] = SentenceSplitter(language=resolved)
+        return _splitter_cache[resolved]
+
+
+def _split_with_sentence_splitter(text: str, lang: str) -> list[str]:
+    """Split text into sentences using sentence-splitter."""
+    splitter = _get_splitter(lang)
+    return [s.strip() for s in splitter.split(text) if s.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def split_sentences(text: str, lang: str = _DEFAULT_LANG) -> list[str]:
-    """Split *text* into a list of sentence strings using spaCy.
+    """Split *text* into a list of sentence strings.
 
-    Drop-in replacement for ``SentenceSplitter(language=lang).split(text)``.
+    Uses spaCy for Japanese (``"ja"``); uses ``sentence-splitter`` for all
+    other languages, falling back to ``"en"`` for unrecognised codes.
 
     Args:
         text: Input text to split.
-        lang: Lowercase two-letter ISO-639-1 language code (``"en"``, ``"de"``,
-              ``"it"``, ``"fr"``, ``"ja"``).  Defaults to ``"en"``.
+        lang: Lowercase two-letter ISO-639-1 language code.  Defaults to
+              ``"en"``.
 
     Returns:
         List of non-empty sentence strings in document order.
@@ -82,7 +104,7 @@ def split_sentences(text: str, lang: str = _DEFAULT_LANG) -> list[str]:
     if not text or not text.strip():
         return []
 
-    resolved = lang if lang in _LANG_TO_MODEL else _DEFAULT_LANG
-    nlp = _load_model(resolved)
-    doc = nlp(text)
-    return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+    if lang == _JA_LANG:
+        return _split_with_spacy_ja(text)
+
+    return _split_with_sentence_splitter(text, lang)

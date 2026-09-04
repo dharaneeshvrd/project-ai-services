@@ -48,13 +48,9 @@ pypdfium2==5.9.0
 pdfplumber==0.11.9
 RapidFuzz==3.14.5
 docling==2.95.0
+sentence-splitter==1.4
 spacy==3.8.7
-# The model wheels are py3-none-any — pure Python, no compilation, needed for initial 4 languages
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
-https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl
-https://github.com/explosion/spacy-models/releases/download/it_core_news_sm-3.8.0/it_core_news_sm-3.8.0-py3-none-any.whl
-https://github.com/explosion/spacy-models/releases/download/fr_core_news_sm-3.8.0/fr_core_news_sm-3.8.0-py3-none-any.whl
-# Japanese model (py3-none-any) — requires sudachipy + sudachidict-core for the SudachiPy tokeniser
+# Japanese model only — requires sudachipy + sudachidict-core for the SudachiPy tokeniser
 https://github.com/explosion/spacy-models/releases/download/ja_core_news_sm-3.8.0/ja_core_news_sm-3.8.0-py3-none-any.whl
 sudachipy==0.6.11
 sudachidict-core==20260723
