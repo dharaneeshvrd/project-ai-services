@@ -13,6 +13,38 @@ logger = get_logger("LLM")
 
 
 
+# ---------------------------------------------------------------------------
+# Request payload recording
+# ---------------------------------------------------------------------------
+# Set LLM_RECORD_DIR to a directory path to enable payload capture.
+# Each recorded payload is written as a numbered JSON file so the
+# crash-reproduction script can replay them verbatim.
+_RECORD_DIR: str | None = os.getenv("LLM_RECORD_DIR")
+_record_counter: int = 0
+_record_lock = threading.Lock()
+
+
+def _record_request_payload(endpoint: str, payload: dict) -> None:
+    """Write *payload* to a JSON file inside LLM_RECORD_DIR when recording is enabled.
+
+    Files are named ``request_<N>.json`` where *N* is a zero-padded monotonically
+    increasing counter.  The envelope also stores the target *endpoint* so the
+    replay script can reconstruct the full URL.
+    """
+    if not _RECORD_DIR:
+        return
+    global _record_counter
+    os.makedirs(_RECORD_DIR, exist_ok=True)
+    with _record_lock:
+        idx = _record_counter
+        _record_counter += 1
+    record = {"endpoint": endpoint, "payload": payload}
+    path = os.path.join(_RECORD_DIR, f"request_{idx:05d}.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(record, fh, ensure_ascii=False)
+
+
+
 def apply_token_buffer(max_tokens: int, token_buffer_ratio: float | None = None, context: str = "LLM") -> int:
     """
     Apply token buffer to give LLM breathing room to respect prompt word limits.
@@ -64,6 +96,7 @@ def summarize_and_classify_single_table(prompt, gen_model, llm_endpoint, max_tok
     }
 
     try:
+        _record_request_payload(llm_endpoint, payload)
         response = misc_utils.SESSION.post(f"{llm_endpoint}/v1/chat/completions", json=payload, headers=get_vllm_headers(settings.llm.api_key))
         response.raise_for_status()
         data = response.json() or {}
