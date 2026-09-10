@@ -20,9 +20,9 @@ Usage
            --concurrency 32 \\
            [--api-key YOUR_KEY]
 
-   The script saturates the server with exactly ``--concurrency`` concurrent
-   requests (matching the vLLM batch size), cycling through all recorded
-   payloads if there are fewer than 32.
+   ALL request_*.json files in the directory are sent.  At most
+   ``--concurrency`` requests are in-flight at any point in time, matching the
+   vLLM batch size.  Progress is printed as each response arrives.
 """
 
 import argparse
@@ -123,29 +123,38 @@ def main() -> None:
     records = load_records(args.record_dir)
     session = build_session(args.concurrency)
 
-    # Build the exact batch: cycle through records until we have ``concurrency`` items
-    batch: list[tuple[int, str, dict]] = []
-    for i in range(args.concurrency):
-        rec = records[i % len(records)]
-        endpoint = args.endpoint or rec["endpoint"]
-        batch.append((i, endpoint, rec["payload"]))
+    # Send every recorded file; concurrency caps the number of in-flight requests.
+    batch: list[tuple[int, str, dict]] = [
+        (i, args.endpoint or rec["endpoint"], rec["payload"])
+        for i, rec in enumerate(records)
+    ]
 
-    print(f"[INFO]  Firing {len(batch)} concurrent requests (concurrency={args.concurrency}) …")
+    total = len(batch)
+    print(
+        f"[INFO]  Sending all {total} recorded requests "
+        f"with concurrency={args.concurrency} …"
+    )
+
     results = []
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         futures = {
             pool.submit(send_request, session, ep, payload, args.api_key, idx): idx
             for idx, ep, payload in batch
         }
+        done = 0
         for future in as_completed(futures):
-            results.append(future.result())
+            result = future.result()
+            results.append(result)
+            done += 1
+            status_str = str(result["status"]) if result["status"] else f"ERR({result['error']})"
+            print(f"  [{done:>{len(str(total))}}/{total}] req {result['idx']:>5}  status={status_str}  elapsed={result['elapsed']:.2f}s")
 
     # Print summary
     results.sort(key=lambda r: r["idx"])
     errors = [r for r in results if r["error"] or (r["status"] and r["status"] >= 400)]
-    print(f"\n[SUMMARY] {len(results)} requests sent — {len(errors)} failures\n")
+    print(f"\n[SUMMARY] {total} requests sent — {len(errors)} failures\n")
     for r in errors:
-        print(f"  req {r['idx']:>3}: status={r['status']}  error={r['error']}  elapsed={r['elapsed']:.2f}s")
+        print(f"  req {r['idx']:>5}: status={r['status']}  error={r['error']}  elapsed={r['elapsed']:.2f}s")
         if r["body"]:
             body_str = json.dumps(r["body"]) if isinstance(r["body"], dict) else str(r["body"])
             print(f"           body={body_str[:300]}")
