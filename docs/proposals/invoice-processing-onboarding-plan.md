@@ -1,17 +1,20 @@
 # Invoice Processing EBS → project-ai-services Onboarding Plan
 
-**Epic Goal:** Onboard the in-house Invoice Processing EBS workflow into `project-ai-services` by introducing a new **invoice-processing** orchestration service and offloading document parsing + OCR to the existing `digitize` service and structured extraction to the existing `extract` service, while closing the capability gaps that block this integration.
+**Epic Goal:** Onboard the in-house Invoice Processing workflow into `project-ai-services` by introducing a new **invoice-processing** orchestration service and offloading document parsing + OCR to the existing `digitize` service and structured extraction to the existing `extract` service, while closing the capability gaps that block this integration.
 
 ### Responsibility split
 
 | Service | Responsibility |
 |---------|---------------|
+| **`invoice-processing` UI** *(existing — reused as-is)* | Frontend web app; file upload, pipeline status, human review, interface viewer — **no changes required** |
+| **`invoice-processing` backend** *(new — replaces existing backend entirely)* | E2E orchestration — pipeline routing (image vs PDF), calling digitize (PDF→MD) and extract, assembling output JSON, staging, review, and DB load |
 | **`digitize`** | Receives any PDF file; internally detects digital vs scanned; routes to Docling (digital) or RapidOCR (scanned); always outputs **Markdown** |
 | **`extract`** | Structured field extraction from `.txt` / `.md` files (text LLM) or image files (Ministral-3B-14b-instruct VLM); does **not** receive raw PDFs |
-| **`invoice-processing`** *(new)* | E2E orchestration — pipeline routing (image vs PDF), calling digitize (PDF→MD) and extract, assembling EBS JSON output |
 
 > **PDF flow:** `invoice-processing` sends a PDF to `digitize`; `digitize` handles digital vs scanned detection internally and returns Markdown; `invoice-processing` forwards that Markdown to `extract`. The digital/scanned decision is entirely owned by `digitize` — `invoice-processing` does not need to know.
 > **Image flow:** `invoice-processing` forwards image invoices (`.png`, `.jpg`, `.tiff`) directly to `extract` (VLM path) — `digitize` is not involved.
+
+> ⚠️ **Deviation from original app:** The original invoice-processing application writes to **Oracle EBS** (`AP_INVOICES_INTERFACE` / `AP_INVOICE_LINES_INTERFACE`). This onboarding targets **Oracle DB / IBM i DB2** as the output database. All interface table names and connection configuration reflect this change.
 
 ---
 
@@ -20,7 +23,8 @@
 > **UI note:** The existing frontend UI is reused as-is. Only the backend is being replaced.
 
 ```mermaid
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 60, "rankSpacing": 80, "fontSize": 18}} }%%
+flowchart TD
     %% ── INPUT ───────────────────────────────────────────────────
     UI["🖥️ Frontend UI\n(existing — unchanged)"]
     ROUTER["invoice-processing\nPipeline Router\nDetects input type"]
@@ -28,22 +32,22 @@ flowchart LR
     UI -->|"invoice file upload"| ROUTER
 
     %% ── IMAGE PATH ──────────────────────────────────────────────
-    ROUTER -->|"image\n.png / .jpg / .tiff"| EXTRACT_VLM
+    ROUTER -->|"image  ·  .png / .jpg / .tiff"| EXTRACT_VLM
 
-    subgraph SVC_EXTRACT_VLM["extract service"]
+    subgraph SVC_EXTRACT_VLM["  extract service  "]
         direction TB
-        EXTRACT_VLM["Ministral-3B-14b-instruct\nMultimodal VLM\n1 call — full JSON in one pass\n~20–30s"]
+        EXTRACT_VLM["Ministral-3B-14b-instruct\nMultimodal VLM\n1 call — full JSON in one pass\n~20–30 s"]
     end
 
     %% ── PDF PATH ────────────────────────────────────────────────
     ROUTER -->|".pdf"| DIGITIZE
 
-    subgraph SVC_DIGITIZE["digitize service"]
+    subgraph SVC_DIGITIZE["  digitize service  "]
         direction TB
-        DIGITIZE["PDF type detection\nDigital → Docling → Markdown\nScanned → RapidOCR → Markdown\nAlways outputs .md"]
+        DIGITIZE["PDF type detection\nDigital  →  Docling  →  Markdown\nScanned  →  RapidOCR  →  Markdown\nAlways outputs  .md"]
     end
 
-    subgraph SVC_EXTRACT_TXT["extract service"]
+    subgraph SVC_EXTRACT_TXT["  extract service  "]
         direction TB
         EXTRACT_TXT["Text LLM\nStructured JSON extraction\nfrom Markdown input"]
     end
@@ -55,7 +59,7 @@ flowchart LR
     EXTRACT_VLM -->|"structured JSON"| STAGING
     EXTRACT_TXT -->|"structured JSON"| STAGING
 
-    subgraph SVC_IP["invoice-processing service  (new backend)"]
+    subgraph SVC_IP["  invoice-processing service  (new backend)  "]
         direction TB
         STAGING["Staging Agent\nValidate · Normalise · Store"]
         REVIEW["Human Review\nApprove / Edit / Reject"]
@@ -63,15 +67,15 @@ flowchart LR
         STAGING --> REVIEW -->|"Approved"| LOAD
     end
 
-    LOAD -->|"AP_INVOICES_INTERFACE\nAP_INVOICE_LINES_INTERFACE"| ORACLE[("Oracle EBS")]
+    LOAD -->|"invoice JSON  ·  lines JSON"| ORACLE[("Oracle DB\n/ IBM i DB2")]
     REVIEW -->|"Rejected"| REJECTED(["❌ Rejected"])
 
     %% ── STYLES ──────────────────────────────────────────────────
-    classDef svc_ip       fill:#e8f0fe,color:#1f2328,stroke:#3b82d4
-    classDef svc_digitize fill:#f0fdf4,color:#1f2328,stroke:#1a7a4a
-    classDef svc_extract  fill:#fdf4ff,color:#1f2328,stroke:#7c5cd8
-    classDef ui           fill:#1f2328,color:#fff,stroke:#1f2328
-    classDef oracle       fill:#1f2328,color:#fff,stroke:#1f2328
+    classDef svc_ip       fill:#e8f0fe,color:#1f2328,stroke:#3b82d4,stroke-width:2px
+    classDef svc_digitize fill:#f0fdf4,color:#1f2328,stroke:#1a7a4a,stroke-width:2px
+    classDef svc_extract  fill:#fdf4ff,color:#1f2328,stroke:#7c5cd8,stroke-width:2px
+    classDef ui           fill:#1f2328,color:#fff,stroke:#1f2328,stroke-width:2px
+    classDef oracle       fill:#1f2328,color:#fff,stroke:#1f2328,stroke-width:2px
 
     class SVC_IP svc_ip
     class SVC_DIGITIZE svc_digitize
@@ -113,9 +117,9 @@ flowchart LR
 |---|-------|-------------|
 | I-1 | **Service scaffold** | New FastAPI service with job model, DB schema, settings, health endpoint |
 | I-2 | **Pipeline router** | Single-stage routing: detect input type (image → One-Shot path; PDF → PDF path). No PDF-type detection in `invoice-processing` — that is owned by `digitize`. |
-| I-3 | **PDF-Path orchestration** | PDF → send to `digitize` → receive Markdown back → forward Markdown to `extract` (text LLM) → assemble EBS JSON. Applies to all PDFs regardless of digital/scanned. |
-| I-4 | **One-Shot orchestration** | Image invoice → call `extract` VLM endpoint (`Ministral-3B-14b-instruct`) directly → map result to EBS JSON |
-| I-5 | **EBS JSON output + API** | Unified output schema (`AP_INVOICES_ALL` + `AP_INVOICE_LINES_ALL`); job status + result endpoints |
+| I-3 | **PDF-Path orchestration** | PDF → send to `digitize` → receive Markdown back → forward Markdown to `extract` (text LLM) → assemble invoice JSON. Applies to all PDFs regardless of digital/scanned. |
+| I-4 | **One-Shot orchestration** | Image invoice → call `extract` VLM endpoint (`Ministral-3B-14b-instruct`) directly → map result to invoice JSON |
+| I-5 | **Invoice JSON output + API** | Unified output schema (`AP_INVOICES_ALL` + `AP_INVOICE_LINES_ALL`); job status + result endpoints |
 
 ---
 
@@ -239,7 +243,7 @@ flowchart LR
 **Depends on:** I-2, D-1
 **Can run in parallel with:** I-4
 
-**What:** Implement the PDF path: send any PDF (regardless of digital/scanned) to `digitize` → receive Markdown output → forward the Markdown to `extract` (text LLM) → map structured JSON result to EBS output. `invoice-processing` treats all PDFs identically; `digitize` owns the internal digital/scanned routing.
+**What:** Implement the PDF path: send any PDF (regardless of digital/scanned) to `digitize` → receive Markdown output → forward the Markdown to `extract` (text LLM) → map structured JSON result to invoice output. `invoice-processing` treats all PDFs identically; `digitize` owns the internal digital/scanned routing.
 
 **Acceptance criteria:**
 - PDF invoice sent to `digitize`; Markdown received back
@@ -255,7 +259,7 @@ flowchart LR
 **Depends on:** I-2, E-1
 **Can run in parallel with:** I-3
 
-**What:** Implement the One-Shot path: forward image invoice (`.png`, `.jpg`, `.tiff`) directly to the `extract` VLM endpoint (`Ministral-3B-14b-instruct`) → receive schema-validated JSON → map to EBS JSON output.
+**What:** Implement the One-Shot path: forward image invoice (`.png`, `.jpg`, `.tiff`) directly to the `extract` VLM endpoint (`Ministral-3B-14b-instruct`) → receive schema-validated JSON → map to invoice JSON output.
 
 **Acceptance criteria:**
 - Image invoice forwarded directly to `extract` VLM endpoint with correct schema
@@ -265,14 +269,14 @@ flowchart LR
 
 ---
 
-#### I-5 · EBS JSON Output & Job API
+#### I-5 · Invoice JSON Output & Job API
 **Priority:** High
 **Depends on:** I-3, I-4 (can start in parallel, finalised after)
 
-**What:** Define and implement the unified EBS JSON output schema (`AP_INVOICES_ALL` + `AP_INVOICE_LINES_ALL`) and the public job API: submit invoice, poll status, retrieve result.
+**What:** Define and implement the unified invoice JSON output schema (`AP_INVOICES_ALL` + `AP_INVOICE_LINES_ALL`) and the public job API: submit invoice, poll status, retrieve result.
 
 **Acceptance criteria:**
-- Both paths (PDF-Path and One-Shot) produce identical EBS JSON structure
+- Both paths (PDF-Path and One-Shot) produce identical invoice JSON structure
 - `POST /invoices` accepts file upload + optional metadata; returns `job_id`
 - `GET /invoices/{job_id}` returns job status and result
 - OpenAPI docs complete
@@ -292,7 +296,7 @@ I-1 (scaffold)
   └── I-2 (router)
         ├── I-3 (PDF-Path)   needs D-1
         └── I-4 (One-Shot)   needs E-1
-              └── I-5 (EBS output API)
+              └── I-5 (invoice output API)
 ```
 
 **Parallel execution plan:**
@@ -571,7 +575,9 @@ Reject the staged invoice with a reason.
 ### Config API (`/api/config`)
 
 #### `GET /api/config/oracle/status`
-Return current Oracle EBS connection status (no credentials exposed).
+Return current Oracle DB / IBM i DB2 connection status (no credentials exposed).
+
+> ⚠️ **Deviation:** Original app connected to Oracle EBS. This service targets Oracle DB or IBM i DB2.
 
 **Response 200:**
 ```json
@@ -581,11 +587,11 @@ Return current Oracle EBS connection status (no credentials exposed).
 ---
 
 #### `POST /api/config/oracle/connect`
-Persist Oracle credentials and test the connection.
+Persist database credentials and test the connection.
 
 **Request body:**
 ```json
-{ "host": "...", "port": 1521, "service_name": "EBSPROD", "sid": "", "username": "apps", "password": "...", "client_dir": "", "wallet_dir": "", "wallet_password": "" }
+{ "host": "...", "port": 1521, "service_name": "PROD", "sid": "", "username": "apps", "password": "...", "client_dir": "", "wallet_dir": "", "wallet_password": "" }
 ```
 **Response 200:** `{ "message": "...", "oracle_version": "...", "host": "...", "user": "..." }`
 **Response 502:** Connection test failed.
@@ -598,28 +604,30 @@ Test the currently configured connection.
 ---
 
 #### `DELETE /api/config/oracle`
-Clear Oracle credentials.
+Clear stored database credentials.
 
 ---
 
 #### `GET /api/config/oracle/sources`
-Return AP invoice source lookup values from EBS (or fallback list).
+Return invoice source lookup values from the target database (or fallback list).
 
-**Response 200:** `{ "sources": [{ "code": "MANUAL INVOICE ENTRY", "meaning": "Manual Invoice Entry" }], "from_ebs": true }`
+**Response 200:** `{ "sources": [{ "code": "MANUAL INVOICE ENTRY", "meaning": "Manual Invoice Entry" }], "from_db": true }`
 
 ---
 
 #### `GET /api/config/oracle/line-types`
-Return AP invoice line type lookup codes from EBS (or fallback list).
+Return invoice line type lookup codes from the target database (or fallback list).
 
-**Response 200:** `{ "line_types": ["ITEM", "FREIGHT", "TAX", ...], "from_ebs": true }`
+**Response 200:** `{ "line_types": ["ITEM", "FREIGHT", "TAX", ...], "from_db": true }`
 
 ---
 
 ### Interface API (`/api/interface`)
 
 #### `GET /api/interface/invoices`
-Return all rows in `AP_INVOICES_INTERFACE`, most recent first. Uses real Oracle tables when configured, SQLite mirror otherwise.
+Return all stored invoice records, most recent first. Uses real Oracle DB / IBM i DB2 tables when configured, SQLite mirror otherwise.
+
+> ⚠️ **Deviation:** Original app read from `AP_INVOICES_INTERFACE` in Oracle EBS. This service reads from the equivalent table in Oracle DB / IBM i DB2.
 
 ---
 
@@ -644,7 +652,7 @@ Return tail of the application log.
 
 ## I-6 Story Update — API Surface
 
-Story I-6 must implement **all of the above endpoints** to ensure the existing UI works without modification. The Oracle config and Interface APIs may delegate to the existing `app-frontend` backend or be re-implemented in the new service — this is a deployment decision to be confirmed during I-1 scaffolding.
+Story I-6 must implement **all of the above endpoints** to ensure the existing UI works without modification. The Oracle DB / IBM i DB2 config and Interface APIs may delegate to the existing `app-frontend` backend or be re-implemented in the new service — this is a deployment decision to be confirmed during I-1 scaffolding.
 
 ---
 
