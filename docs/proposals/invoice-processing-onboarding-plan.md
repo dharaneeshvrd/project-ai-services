@@ -7,7 +7,7 @@
 | Service | Responsibility |
 |---------|---------------|
 | **`digitize`** | Receives any PDF file; internally detects digital vs scanned; routes to Docling (digital) or RapidOCR (scanned); always outputs **Markdown** |
-| **`extract`** | Structured field extraction from `.txt` / `.md` files (text LLM) or image files (Mistral Multimodal VLM); does **not** receive raw PDFs |
+| **`extract`** | Structured field extraction from `.txt` / `.md` files (text LLM) or image files (Ministral-3B-14b-instruct VLM); does **not** receive raw PDFs |
 | **`invoice-processing`** *(new)* | E2E orchestration — pipeline routing (image vs PDF), calling digitize (PDF→MD) and extract, assembling EBS JSON output |
 
 > **PDF flow:** `invoice-processing` sends a PDF to `digitize`; `digitize` handles digital vs scanned detection internally and returns Markdown; `invoice-processing` forwards that Markdown to `extract`. The digital/scanned decision is entirely owned by `digitize` — `invoice-processing` does not need to know.
@@ -17,91 +17,67 @@
 
 ## Decision Flow
 
-```mermaid
-flowchart TD
-    START(["📄 Invoice File Arrives\nPDF · PNG · JPG · TIFF · HTML"])
-
-    START --> STAGE1{"STAGE 1 — PIPELINE ROUTING\nWhat is the input type?"}
-
-    STAGE1 -->|"image / single-page"| ONESHOT_PATH
-    STAGE1 -->|"PDF"| PDF_PATH
-
-    %% ── ONE-SHOT PATH ──────────────────────────────────────────
-    subgraph ONESHOT_PATH["⚡ ONE-SHOT PATH  ~20% traffic"]
-        direction TB
-        OS1["invoice-processing\nsends image to extract"]
-        OS2["extract service\nMistral Multimodal VLM\n1 multimodal call\nPage rendered as image\nFull JSON in one pass"]
-        OS3["~20–30s"]
-        OS1 --> OS2 --> OS3
-    end
-
-    %% ── PDF PATH ────────────────────────────────────────────────
-    subgraph PDF_PATH["📄 PDF PATH"]
-        direction TB
-        PDF1["invoice-processing\nsends PDF to digitize"]
-        PDF2["digitize service\nDetects digital vs scanned internally\nDigital → Docling → Markdown\nScanned → RapidOCR → Markdown\n→ Markdown output always"]
-        PDF3["invoice-processing\nreceives Markdown\nforwards to extract"]
-        PDF4["extract service\nText LLM\nextracts structured JSON"]
-        PDF1 --> PDF2 --> PDF3 --> PDF4
-    end
-
-    %% ── CONVERGENCE ─────────────────────────────────────────────
-    ONESHOT_PATH --> STAGING
-    PDF_PATH --> STAGING
-
-    STAGING["invoice-processing\nStaging Agent\nValidate · Normalise · Store"]
-    STAGING --> REVIEW["Human Review\nApprove / Edit / Reject"]
-    REVIEW -->|"Approved"| LOAD["Interface Load Agent\nOracle EBS\nAP_INVOICES_INTERFACE\nAP_INVOICE_LINES_INTERFACE"]
-    REVIEW -->|"Rejected"| REJECTED(["❌ Rejected"])
-    LOAD --> OUTPUT(["✅ All paths produce identical EBS JSON\nAP_INVOICES_ALL + AP_INVOICE_LINES_ALL\nvia metadata pipeline"])
-
-    %% ── LEGEND STYLES ───────────────────────────────────────────
-    classDef pdfpath    fill:#1a7a4a,color:#fff,stroke:#0f5c34
-    classDef oneshot    fill:#2a4ea6,color:#fff,stroke:#1a3580
-    classDef service    fill:#f0f4ff,color:#1f2328,stroke:#3b82d4
-    classDef gate       fill:#f7f8fa,color:#1f2328,stroke:#7c5cd8
-    classDef output     fill:#1f2328,color:#fff,stroke:#1f2328
-    classDef staging    fill:#e8f0fe,color:#1f2328,stroke:#3b82d4
-
-    class PDF_PATH pdfpath
-    class ONESHOT_PATH oneshot
-    class STAGE1 gate
-    class OUTPUT,START output
-    class STAGING,REVIEW,LOAD staging
-```
-
-## Service Responsibility Map
+> **UI note:** The existing frontend UI is reused as-is. Only the backend is being replaced.
 
 ```mermaid
 flowchart LR
-    UI["🖥️ Frontend UI"]
+    %% ── INPUT ───────────────────────────────────────────────────
+    UI["🖥️ Frontend UI\n(existing — unchanged)"]
+    ROUTER["invoice-processing\nPipeline Router\nDetects input type"]
 
-    subgraph NEW["invoice-processing service  (new)"]
+    UI -->|"invoice file upload"| ROUTER
+
+    %% ── IMAGE PATH ──────────────────────────────────────────────
+    ROUTER -->|"image\n.png / .jpg / .tiff"| EXTRACT_VLM
+
+    subgraph SVC_EXTRACT_VLM["extract service"]
         direction TB
-        API["REST API\n/api/pipeline/*\n/api/review/*\n/api/config/*\n/api/interface/*"]
-        ROUTER["Pipeline Router\nStage 1 routing: image vs PDF"]
-        ORCH["Path Orchestrators\nPDF-Path · One-Shot"]
-        STAGE_AGT["Staging Agent"]
-        REVIEW_AGT["Review Agent"]
-        LOAD_AGT["Interface Load Agent"]
-        API --> ROUTER --> ORCH
-        ORCH --> STAGE_AGT --> REVIEW_AGT --> LOAD_AGT
+        EXTRACT_VLM["Ministral-3B-14b-instruct\nMultimodal VLM\n1 call — full JSON in one pass\n~20–30s"]
     end
 
-    subgraph EXISTING["Existing project-ai-services"]
+    %% ── PDF PATH ────────────────────────────────────────────────
+    ROUTER -->|".pdf"| DIGITIZE
+
+    subgraph SVC_DIGITIZE["digitize service"]
         direction TB
-        DIGITIZE["digitize service\nReceives PDF\nInternally: Docling (digital) or RapidOCR (scanned)\n→ Markdown output"]
-        EXTRACT_TXT["extract service\nText LLM path\n.md / .txt input"]
-        EXTRACT_VLM["extract service\nVLM path (Mistral Multimodal)\nimage input"]
+        DIGITIZE["PDF type detection\nDigital → Docling → Markdown\nScanned → RapidOCR → Markdown\nAlways outputs .md"]
     end
 
-    ORACLE[("Oracle EBS\nAP_INVOICES_INTERFACE\nAP_INVOICE_LINES_INTERFACE")]
+    subgraph SVC_EXTRACT_TXT["extract service"]
+        direction TB
+        EXTRACT_TXT["Text LLM\nStructured JSON extraction\nfrom Markdown input"]
+    end
 
-    UI --> API
-    ORCH -->|"PDF → MD"| DIGITIZE
-    ORCH -->|"MD → structured JSON"| EXTRACT_TXT
-    ORCH -->|"image → structured JSON"| EXTRACT_VLM
-    LOAD_AGT --> ORACLE
+    DIGITIZE -->|".md"| IP_FWD["invoice-processing\nforwards Markdown"]
+    IP_FWD -->|".md"| EXTRACT_TXT
+
+    %% ── CONVERGENCE ─────────────────────────────────────────────
+    EXTRACT_VLM -->|"structured JSON"| STAGING
+    EXTRACT_TXT -->|"structured JSON"| STAGING
+
+    subgraph SVC_IP["invoice-processing service  (new backend)"]
+        direction TB
+        STAGING["Staging Agent\nValidate · Normalise · Store"]
+        REVIEW["Human Review\nApprove / Edit / Reject"]
+        LOAD["Interface Load Agent"]
+        STAGING --> REVIEW -->|"Approved"| LOAD
+    end
+
+    LOAD -->|"AP_INVOICES_INTERFACE\nAP_INVOICE_LINES_INTERFACE"| ORACLE[("Oracle EBS")]
+    REVIEW -->|"Rejected"| REJECTED(["❌ Rejected"])
+
+    %% ── STYLES ──────────────────────────────────────────────────
+    classDef svc_ip       fill:#e8f0fe,color:#1f2328,stroke:#3b82d4
+    classDef svc_digitize fill:#f0fdf4,color:#1f2328,stroke:#1a7a4a
+    classDef svc_extract  fill:#fdf4ff,color:#1f2328,stroke:#7c5cd8
+    classDef ui           fill:#1f2328,color:#fff,stroke:#1f2328
+    classDef oracle       fill:#1f2328,color:#fff,stroke:#1f2328
+
+    class SVC_IP svc_ip
+    class SVC_DIGITIZE svc_digitize
+    class SVC_EXTRACT_VLM,SVC_EXTRACT_TXT svc_extract
+    class UI,ROUTER,IP_FWD ui
+    class ORACLE,REJECTED oracle
 ```
 
 ---
@@ -124,8 +100,8 @@ flowchart LR
 
 | # | Gap | Current State | Required |
 |---|-----|--------------|----------|
-| E-1 | **No image file input + no VLM path** | `ALLOWED_EXTENSIONS = {".txt", ".md"}` (`utils/job.py:41`); `validate_file_content` blocks binary files; `process_file` reads UTF-8 text only — no vision model call | Extend the async batch jobs endpoint (`POST /jobs`) to accept `.png`, `.jpg`, `.tiff` image uploads; add a VLM processing path that renders the image and calls Granite Vision 4.1 4B; **PDFs are never passed to extract** |
-| E-2 | **No VLM settings** | `settings.py` has no `vision_llm_endpoint` / `vision_llm_model` config | Add vision model configuration alongside existing LLM settings |
+| E-1 | **No image file input + no VLM path** | `ALLOWED_EXTENSIONS = {".txt", ".md"}` (`utils/job.py:41`); `validate_file_content` blocks binary files; `process_file` reads UTF-8 text only — no vision model call | Extend the async batch jobs endpoint (`POST /jobs`) to accept `.png`, `.jpg`, `.tiff` image uploads; add a VLM processing path that renders the image and calls `Ministral-3B-14b-instruct`; **PDFs are never passed to extract** |
+| E-2 | **No VLM settings** | `settings.py` has no `vision_llm_endpoint` / `vision_llm_model` config | Add `Ministral-3B-14b-instruct` vision model configuration (`vision_llm_endpoint`, `vision_llm_model`) alongside existing LLM settings |
 
 > **Note:** `extract` does **not** handle PDFs — PDF→MD conversion is always done by `digitize` first. E-1 adds image support only. Routing is file-extension-based dispatch inside `process_file`, delivered as part of E-1. The synchronous file extraction endpoint is the responsibility of the new `invoice-processing` service.
 
@@ -138,7 +114,7 @@ flowchart LR
 | I-1 | **Service scaffold** | New FastAPI service with job model, DB schema, settings, health endpoint |
 | I-2 | **Pipeline router** | Single-stage routing: detect input type (image → One-Shot path; PDF → PDF path). No PDF-type detection in `invoice-processing` — that is owned by `digitize`. |
 | I-3 | **PDF-Path orchestration** | PDF → send to `digitize` → receive Markdown back → forward Markdown to `extract` (text LLM) → assemble EBS JSON. Applies to all PDFs regardless of digital/scanned. |
-| I-4 | **One-Shot orchestration** | Image invoice → call `extract` VLM endpoint (Mistral Multimodal) directly → map result to EBS JSON |
+| I-4 | **One-Shot orchestration** | Image invoice → call `extract` VLM endpoint (`Ministral-3B-14b-instruct`) directly → map result to EBS JSON |
 | I-5 | **EBS JSON output + API** | Unified output schema (`AP_INVOICES_ALL` + `AP_INVOICE_LINES_ALL`); job status + result endpoints |
 
 ---
@@ -183,7 +159,7 @@ flowchart LR
 
 **What:** Two tightly coupled capabilities delivered together:
 1. Extend the existing async batch jobs endpoint (`POST /jobs`) to accept `.png`, `.jpg`, `.tiff` image uploads alongside the current `.txt`/`.md` files. Update `ALLOWED_EXTENSIONS`, `validate_file_extension`, and `validate_file_content` to handle binary image formats without breaking the existing text path. **PDF files are not added here** — PDFs are always converted to Markdown by `digitize` first.
-2. Add a VLM processing branch inside `process_file`: when the staged file is an image, call the **Mistral Multimodal** model (configured via `vision_llm_endpoint` / `vision_llm_model`); apply the same schema validation and return the same `JobResultResponse` shape as the text path.
+2. Add a VLM processing branch inside `process_file`: when the staged file is an image, call **`Ministral-3B-14b-instruct`** (configured via `vision_llm_endpoint` / `vision_llm_model`); apply the same schema validation and return the same `JobResultResponse` shape as the text path.
 
 **Where:**
 - `services/extract/utils/job.py` — extend `ALLOWED_EXTENSIONS` with `.png`, `.jpg`, `.tiff`; update validation; add VLM branch in `process_file`
@@ -207,7 +183,7 @@ flowchart LR
 **Depends on:** none (can land before E-1 as a pure settings change)
 **Can run in parallel with:** E-1, all other tracks
 
-**What:** Add `vision_llm_endpoint` and `vision_llm_model` settings to `settings.py` for the **Mistral Multimodal** model, following the same pattern as the existing `llm_endpoint`/`llm_model` settings. Include environment variable bindings and validation.
+**What:** Add `vision_llm_endpoint` and `vision_llm_model` settings to `settings.py` for **`Ministral-3B-14b-instruct`**, following the same pattern as the existing `llm_endpoint`/`llm_model` settings. Include environment variable bindings and validation.
 
 **Where:**
 - `services/extract/settings.py`
@@ -279,7 +255,7 @@ flowchart LR
 **Depends on:** I-2, E-1
 **Can run in parallel with:** I-3
 
-**What:** Implement the One-Shot path: forward image invoice (`.png`, `.jpg`, `.tiff`) directly to the `extract` VLM endpoint (Mistral Multimodal) → receive schema-validated JSON → map to EBS JSON output.
+**What:** Implement the One-Shot path: forward image invoice (`.png`, `.jpg`, `.tiff`) directly to the `extract` VLM endpoint (`Ministral-3B-14b-instruct`) → receive schema-validated JSON → map to EBS JSON output.
 
 **Acceptance criteria:**
 - Image invoice forwarded directly to `extract` VLM endpoint with correct schema
