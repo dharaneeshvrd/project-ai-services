@@ -1,5 +1,7 @@
 # Invoice Processing EBS → project-ai-services Onboarding Plan
 
+> **Scope:** This plan covers **single-document invoice processing** only. Batch processing, user authentication/authorisation, and pipeline resume from mid-stage entrypoints are explicitly deferred — see the [Future Plan](#future-plan) section.
+
 **Epic Goal:** Onboard the in-house Invoice Processing workflow into `project-ai-services` by introducing a new **invoice-processing** orchestration service and offloading document parsing + OCR to the existing `digitize` service and structured extraction to the existing `extract` service, while closing the capability gaps that block this integration.
 
 ### Responsibility split
@@ -43,7 +45,7 @@ flowchart TD
 
     subgraph SVC_DIGITIZE["  digitize service  "]
         direction TB
-        DIGITIZE["PDF type detection\nDigital  →  Docling  →  Markdown\nScanned  →  RapidOCR  →  Markdown\nAlways outputs  .md"]
+        DIGITIZE["PDF type detection\nDigital  →  Docling  →  Markdown\nScanned  →  OCR engine  →  Markdown\nAlways outputs  .md"]
     end
 
     subgraph SVC_EXTRACT_TXT["  extract service  "]
@@ -53,6 +55,10 @@ flowchart TD
 
     DIGITIZE -->|".md"| IP_FWD["invoice-processing\nforwards Markdown"]
     IP_FWD -->|".md"| EXTRACT_TXT
+
+    %% ── SCHEMA REGISTRATION (startup) ───────────────────────────
+    SCHEMA_REG["invoice-processing\nregisters invoice schema\non startup"]
+    SCHEMA_REG -->|"POST /schemas\n(once at startup)"| SVC_EXTRACT_TXT
 
     %% ── CONVERGENCE ─────────────────────────────────────────────
     EXTRACT_VLM -->|"structured JSON"| STAGING
@@ -79,7 +85,7 @@ flowchart TD
     class SVC_IP svc_ip
     class SVC_DIGITIZE svc_digitize
     class SVC_EXTRACT_VLM,SVC_EXTRACT_TXT svc_extract
-    class UI,ROUTER,IP_FWD ui
+    class UI,ROUTER,IP_FWD,SCHEMA_REG ui
     class ORACLE,REJECTED oracle
 ```
 
@@ -105,7 +111,7 @@ flowchart TD
 |---|-----|--------------|----------|
 | E-1 | **No image file input + no VLM path** | `ALLOWED_EXTENSIONS = {".txt", ".md"}` (`utils/job.py:41`); `validate_file_content` blocks binary files; `process_file` reads UTF-8 text only — no vision model call | Extend the async batch jobs endpoint (`POST /jobs`) to accept `.png`, `.jpg`, `.tiff` image uploads; add a VLM processing path that renders the image and calls the configured vision model; **PDFs are never passed to extract** |
 | E-2 | **No VLM settings** | `settings.py` has no `vision_llm_endpoint` / `vision_llm_model` config | Add vision model configuration (`vision_llm_endpoint`, `vision_llm_model`) alongside existing LLM settings |
-| E-3 | **No invoice schema registration endpoint** | No mechanism for external services to register an extraction schema at startup | Add a schema registration endpoint (e.g. `POST /schemas`) so that `invoice-processing` can register its invoice extraction schema on startup; `extract` uses the registered schema for all subsequent invoice extractions |
+| E-3 | **No model validation** | No benchmark or accuracy comparison between candidate models | Run structured evaluation comparing **Granite Vision 4.1 4B**, **Ministral-3B-14b-instruct**, and **Mistral-Small-3.2-24B-Instruct-2506** on a sample invoice dataset; measure extraction accuracy (field-level F-score), inference speed (tokens/s, end-to-end latency), and cost per invoice; select and document the winning model |
 
 > **Note:** `extract` does **not** handle PDFs — PDF→MD conversion is always done by `digitize` first. E-1 adds image support only. Routing is file-extension-based dispatch inside `process_file`, delivered as part of E-1. The synchronous file extraction endpoint is the responsibility of the new `invoice-processing` service.
 
@@ -115,7 +121,7 @@ flowchart TD
 
 | # | Story | Description |
 |---|-------|-------------|
-| I-1 | **Service scaffold** | New FastAPI service with job model, DB schema, settings, health endpoint |
+| I-1 | **Service scaffold** | New FastAPI service with job model, DB schema, settings, health endpoint; registers invoice extraction schema with `extract` on startup |
 | I-2 | **Pipeline router** | Single-stage routing: detect input type (image → One-Shot path; PDF → PDF path). No PDF-type detection in `invoice-processing` — that is owned by `digitize`. |
 | I-3 | **PDF-Path orchestration** | PDF → send to `digitize` → receive Markdown back → forward Markdown to `extract` (text LLM) → assemble invoice JSON. Applies to all PDFs regardless of digital/scanned. |
 | I-4 | **One-Shot orchestration** | Image invoice → call `extract` VLM endpoint directly → map result to invoice JSON |
@@ -201,13 +207,42 @@ flowchart TD
 
 ---
 
+#### E-3 · Model Validation
+**Priority:** High
+**Depends on:** E-2
+**Can run in parallel with:** D-track, I-track
+
+**What:** Run a structured benchmark comparing the three candidate models on a representative sample invoice dataset to select the model used for both text and image extraction paths.
+
+**Models under evaluation:**
+| Model | Type |
+|-------|------|
+| `Granite Vision 4.1 4B` | Multimodal (IBM) |
+| `Ministral-3B-14b-instruct` | Multimodal (Mistral) |
+| `Mistral-Small-3.2-24B-Instruct-2506` | Multimodal (Mistral) |
+
+**Metrics:**
+- **Accuracy** — field-level F-score on a labelled invoice set (header fields + line items)
+- **Inference speed** — tokens/s and end-to-end latency per invoice
+- **Cost** — estimated tokens per invoice across both paths (text + image)
+
+**Where:**
+- `test/model-validation/invoice/` *(new)* — evaluation scripts and labelled fixtures
+
+**Acceptance criteria:**
+- All three models evaluated on the same invoice sample set (≥10 invoices, mix of digital PDF, scanned PDF, image)
+- Results documented in a comparison table with winning model clearly identified
+- Selected model set as default in E-2 settings
+
+---
+
 ### Track I — `invoice-processing` service *(new)*
 
 ---
 
 #### I-1 · Service Scaffold
 **Priority:** High — gates all I-track stories
-**Can run in parallel with:** D-1, E-1, E-2, E-3
+**Can run in parallel with:** D-1, E-1, E-2
 
 **What:** Scaffold the new `invoice-processing` FastAPI service: project structure, DB schema (job + document tables), settings, health endpoint, Containerfile, Makefile — matching the conventions of `digitize` and `extract`.
 
@@ -293,10 +328,10 @@ flowchart TD
 D-1 (PDF type detect + OCR → MD output)   — independent, parallel with everything
 
 E-2 (vision settings)                     — independent, parallel with everything
-E-3 (schema registration endpoint)        — independent, parallel with everything
+E-3 (model validation)                    — depends on E-2; parallel with D-track and I-track
 E-1 (image input + VLM path)              — parallel with D-track
 
-I-1 (scaffold)                            — registers schema with extract on startup (needs E-3)
+I-1 (scaffold)                            — registers invoice schema with extract on startup
   └── I-2 (router)
         ├── I-3 (PDF-Path)   needs D-1
         └── I-4 (One-Shot)   needs E-1
@@ -307,8 +342,8 @@ I-1 (scaffold)                            — registers schema with extract on s
 
 | Sprint | D-track | E-track | I-track |
 |--------|---------|---------|---------|
-| 1 | D-1 | E-2 + E-3 | I-1 (needs E-3) |
-| 2 | — | E-1 | I-2 |
+| 1 | D-1 | E-2 | I-1 |
+| 2 | — | E-1 + E-3 | I-2 |
 | 3 | — | — | I-3 + I-4 (parallel) |
 | 4 | — | — | I-5 |
 
@@ -325,8 +360,20 @@ I-1 (scaffold)                            — registers schema with extract on s
 | extract | `utils/job.py` | E-1 (add `.png`/`.jpg`/`.tiff`; explicitly reject `.pdf`) |
 | extract | `utils/vision.py` *(new)* | E-1 |
 | extract | `api/v1/jobs.py` | E-1 |
-| extract | `api/v1/schemas.py` *(new)* | E-3 |
+| extract | `test/model-validation/invoice/` *(new)* | E-3 |
 | invoice-processing | `services/invoice-processing/` *(new)* | I-1 through I-5 |
+
+---
+
+## Future Plan
+
+The following features exist in the original invoice-processing application but are **explicitly out of scope** for this onboarding. They will be addressed in a follow-up phase once the single-document pipeline is stable.
+
+| # | Feature | Notes |
+|---|---------|-------|
+| F-1 | **Batch document processing** | Submit multiple invoice files in a single job; track per-document status within the batch. Original app supports `POST /api/pipeline/submit-batch`. |
+| F-2 | **User authentication / authorisation** | JWT-based auth, role checks (reviewer vs admin). The existing UI relies on the current `app-frontend` auth system; the new backend defers this entirely. |
+| F-3 | **Pipeline resume from mid-stage entrypoints** | Ability to restart a job from Staging, Review, or Interface Load independently — e.g. `POST /api/pipeline/start-from-staging`, `start-from-review`, `start-from-load`. Not needed for the initial single-document happy path. |
 
 ---
 
