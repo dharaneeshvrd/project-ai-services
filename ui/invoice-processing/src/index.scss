@@ -5,26 +5,15 @@
 @use '@carbon/react';
 @use '@carbon/ibm-products/css/index.min.css';
 
+[data-carbon-theme='g100'] {
+  @include theme.theme(themes.$g100);
+}
+
 html,
 body {
   margin: 0;
+  background-color: var(--cds-background);
   transition: background-color 0.2s ease;
-}
-
-// Light theme (default)
-html,
-body,
-[data-carbon-theme='white'] {
-  background-color: var(--cds-background);
-}
-
-// Dark theme
-[data-carbon-theme='g100'] {
-  background-color: var(--cds-background);
-  
-  body {
-    background-color: var(--cds-background);
-  }
 }
 
 .appLayout {
