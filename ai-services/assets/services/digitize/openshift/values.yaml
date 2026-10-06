@@ -2,7 +2,6 @@ digitize:
   image: icr.io/ai-services-cicd/digitize-service:v0.0.74
   log_level: "INFO"
   database: "digitize_metadata"
-  numShards: 1
   # @generate:password length=32, special=false
   dbEncryptionKey: ""
   resources:
@@ -28,8 +27,4 @@ postgres:
   storage: 5Gi
   # @generate:password
   password: ""
-
-embedding:
-  model:
-    name: ""
 

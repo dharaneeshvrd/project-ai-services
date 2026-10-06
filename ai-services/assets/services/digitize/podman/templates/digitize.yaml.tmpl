@@ -67,12 +67,7 @@ spec:
         - |
           export POSTGRES_USER=$(cat /etc/secret/digitize-db-secret/username)
           export POSTGRES_PASSWORD=$(cat /etc/secret/digitize-db-secret/password)
-          export OPENSEARCH_USERNAME=$(cat /etc/secret/opensearch-secret/username)
-          export OPENSEARCH_PASSWORD=$(cat /etc/secret/opensearch-secret/password)
           export DB_ENCRYPTION_KEY=$(cat /etc/secret/digitize-db-encryption-secret/db-encryption-key)
-          {{- if .Values.llm.apiKey }}
-          export LLM_API_KEY=$(cat /etc/secret/vllm-secret/apiKey)
-          {{- end }}
           exec /var/venv/bin/python -m uvicorn app:app \
             --host 0.0.0.0 \
             --port 4000 \
@@ -105,30 +100,6 @@ spec:
           value: "5"
         - name: DB_MAX_OVERFLOW
           value: "5"
-        - name: EMB_ENDPOINT
-          value: "http://{{ .Values.embedding.host }}:{{ .Values.embedding.port }}"
-        - name: EMB_MODEL
-          value: "{{ .Values.embedding.model }}"
-        - name: EMB_MAX_MODEL_LEN
-          value: "{{ .Values.embedding.maxModelLen }}"
-        - name: LLM_ENDPOINT
-          value: "http://{{ .Values.llm.host }}:{{ .Values.llm.port }}"
-        - name: LLM_MODEL
-          value: "{{ .Values.llm.model }}"
-        - name: LLM_MAX_MODEL_LEN
-          value: "{{ .Values.llm.maxModelLen }}"
-        - name: LLM_MAX_BATCH_SIZE
-          value: "{{ .Values.llm.maxBatchSize }}"
-        - name: OPENSEARCH_HOST
-          value: "{{ .Values.vector_store.host }}"
-        - name: OPENSEARCH_PORT
-          value: "{{ .Values.vector_store.port }}"
-        - name: OPENSEARCH_DB_PREFIX
-          value: "RAG_DB"
-        - name: OPENSEARCH_INDEX_NAME
-          value: "RAG_INDEX"
-        - name: OPENSEARCH_NUM_SHARDS
-          value: "1"
         - name: LOG_LEVEL
           value: "{{ .Values.digitize.log_level }}"
       volumeMounts:
@@ -137,17 +108,9 @@ spec:
         - mountPath: /etc/secret/digitize-db-secret
           name: digitize-db-secret
           readOnly: true
-        - mountPath: /etc/secret/opensearch-secret
-          name: opensearch-secret
-          readOnly: true
         - mountPath: /etc/secret/digitize-db-encryption-secret
           name: digitize-db-encryption-secret
           readOnly: true
-        {{- if .Values.llm.apiKey }}
-        - mountPath: /etc/secret/vllm-secret
-          name: vllm-secret
-          readOnly: true
-        {{- end }}
     - name: mcp-sidecar
       image: "{{ .Values.mcp.image }}"
       args:
@@ -188,11 +151,3 @@ spec:
     - name: digitize-db-encryption-secret
       secret:
         secretName: "digitize-db-encryption-secret-{{ .InstanceSlug }}"
-    - name: opensearch-secret
-      secret:
-        secretName: "opensearch-secret-{{ .Values.vector_store.instanceSlug }}"
-    {{- if .Values.llm.apiKey }}
-    - name: vllm-secret
-      secret:
-        secretName: "vllm-secret-{{ .Values.llm.instanceSlug }}"
-    {{- end }}

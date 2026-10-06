@@ -12,12 +12,6 @@ certified_by: "IBM"
 architectures:
   - rag
 
-# Dependencies on other components
-dependencies:
-  - id: vector_store
-  - id: embedding
-  - id: llm
-
 standalone: true
 accepts_datasource: true
 
@@ -27,36 +21,16 @@ about:
     sections:
       - title: "Version"
         value: "1.0.0"
-      - title: "Large language model (LLM)"
-        value: "granite-3.3-8b-instruct"
-      - title: "Inference backend"
-        values:
-          - "Red Hat AI Inference with Spyre"
-          - "AI Inference on CPU"
-          - "IBM watsonx.ai on IBM Cloud"
-      - title: "Embedding model"
-        value: "granite-embedding-278m-multilingual"
-      - title: "Vector store"
-        value: "OpenSearch"
 
   - title: "Inputs and outputs"
     sections:
       - title: "Inputs"
         values:
           - "Document files (e.g., PDFs)"
-          - "Flag if texts shall be filtered, embedded, and indexed into knowledge management (optional)"
       - title: "Outputs"
         values:
           - "Texts digitized from input documents"
           - "Pointers to digitized input documents"
-          - "Knowledge management indexing status"
-
-  - title: "Dependencies and integration"
-    sections:
-      - title: "External dependencies"
-        values:
-          - "Inferencing endpoint compatible with OpenAI or similar AI APIs (required for LLM-based summarization capabilities)"
-          - "Supported VectorDB (required for knowledge management features such as embeddings, indexing, and similarity search)"
 
   - title: "Content and format support"
     sections:
@@ -90,9 +64,6 @@ about:
 
   - title: "Assets"
     sections:
-      - title: "Architectures"
-        values:
-          - "Digital assistant"
       - title: "Source code"
         ctaLabel: "View source code"
         url: "https://github.com/IBM/project-ai-services"
