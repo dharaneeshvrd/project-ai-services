@@ -1,0 +1,16 @@
+containers:
+  - name: "invoice-processing-ui"
+    workload: "invoice-processing-ui"
+    format: ".Status"
+    alias: UI_STATUS
+
+  - name: "invoice-processing-api"
+    workload: "invoice-processing-api"
+    format: ".Status"
+    alias: API_STATUS
+
+hosts:
+  - fetch: UI_URL
+    type: ui
+  - fetch: API_URL
+    type: api

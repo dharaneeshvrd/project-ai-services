@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "invoice-processing-ui"
+  labels:
+    ai-services.io/service: {{ .Release.Name }}
+    ai-services.io/template: {{ .Values.templateID }}
+    ai-services.io/version: {{ default .Chart.AppVersion | quote }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      ai-services.io/service: {{ .Release.Name }}
+      ai-services.io/component: invoice-processing-ui
+  template:
+    metadata:
+      labels:
+        ai-services.io/service: {{ .Release.Name }}
+        ai-services.io/template: {{ .Values.templateID }}
+        ai-services.io/component: invoice-processing-ui
+        ai-services.io/component-type: ui
+        ai-services.io/version: {{ default .Chart.AppVersion | quote }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: invoice-processing-ui
+          image: "{{ .Values.invoiceProcessingUi.image }}"
+          resources:
+            requests:
+              cpu: {{ .Values.invoiceProcessingUi.resources.requests.cpu | quote }}
+              memory: {{ .Values.invoiceProcessingUi.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.invoiceProcessingUi.resources.limits.cpu | quote }}
+              memory: {{ .Values.invoiceProcessingUi.resources.limits.memory | quote }}
+          env:
+            - name: BACKEND_HOST
+              value: "invoice-processing-api"
+            - name: BACKEND_PORT
+              value: "4100"
+          ports:
+            - containerPort: 4101
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 4101
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 4101
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3

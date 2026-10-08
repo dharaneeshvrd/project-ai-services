@@ -1,0 +1,20 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: "invoice-processing-ui"
+  labels:
+    ai-services.io/service: {{ .Release.Name }}
+    ai-services.io/template: {{ .Values.templateID }}
+    ai-services.io/version: {{ default .Chart.AppVersion | quote }}
+    ai-services.io/endpoint-type: ui
+  annotations:
+    haproxy.router.openshift.io/set-forwarded-for: "true"
+spec:
+  port:
+    targetPort: 4101
+  to:
+    kind: Service
+    name: "invoice-processing-ui"
+  tls:
+    insecureEdgeTerminationPolicy: Redirect
+    termination: edge
