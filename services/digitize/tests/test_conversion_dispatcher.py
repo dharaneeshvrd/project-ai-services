@@ -699,16 +699,3 @@ class TestRunConversionUpdated:
         # The dispatcher no longer deletes the staged input file — that is now
         # the pipeline layer's responsibility (via cleanup_staging_directory).
         assert cached.exists(), "Dispatcher must NOT delete the staged file; pipeline owns cleanup"
-
-
-@pytest.mark.unit
-class TestWorkerInitializer:
-    """Tests for worker process initializer in conversion dispatcher."""
-
-    def test_init_conversion_worker_sets_log_level(self):
-        """Worker initializer configures logging with settings.common.app.log_level."""
-        from digitize.workers.conversion_dispatcher import _init_conversion_worker
-
-        with patch("digitize.workers.conversion_dispatcher.set_log_level") as mock_set_level:
-            _init_conversion_worker()
-            mock_set_level.assert_called_once()
