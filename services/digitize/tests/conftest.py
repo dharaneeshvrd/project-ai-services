@@ -57,7 +57,9 @@ def mock_diagnostic_crash_handler():
 for _pkg in [
     "docling",
     "docling.datamodel",
+    "docling.datamodel.base_models",
     "docling.datamodel.document",
+    "docling.datamodel.pipeline_options",
     "docling.document_converter",
     "docling_core",
     "docling_core.types",
@@ -66,9 +68,13 @@ for _pkg in [
 ]:
     _stub_module(_pkg)
 
-# Expose the symbols that docling_utils.py imports at module level.
+# Expose the symbols that converter.py imports at module / function level.
+sys.modules["docling.datamodel.base_models"].InputFormat = MagicMock(name="InputFormat")
+sys.modules["docling.datamodel.pipeline_options"].PdfPipelineOptions = MagicMock(name="PdfPipelineOptions")
+sys.modules["docling.datamodel.pipeline_options"].RapidOcrOptions = MagicMock(name="RapidOcrOptions")
 sys.modules["docling.datamodel.document"].ConversionResult = MagicMock(name="ConversionResult")
 sys.modules["docling.document_converter"].DocumentConverter = MagicMock(name="DocumentConverter")
+sys.modules["docling.document_converter"].PdfFormatOption = MagicMock(name="PdfFormatOption")
 sys.modules["docling_core.types.doc.document"].DoclingDocument = MagicMock(name="DoclingDocument")
 
 

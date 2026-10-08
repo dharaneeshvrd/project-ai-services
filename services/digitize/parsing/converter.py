@@ -9,6 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Optional
+import pypdfium2 as pdfium
 
 # Local application imports
 from common.misc_utils import get_logger, DoclingConversionError
@@ -175,7 +176,8 @@ def convert_doc(
     if not path.exists():
         raise FileNotFoundError(f"Document not found: {path}")
 
-    doc_converter: DocumentConverter = get_doc_converter(ocr_doc=True)
+    ocr_doc = is_ocr_doc(path)
+    doc_converter: DocumentConverter = get_doc_converter(ocr_doc=ocr_doc)
 
     # Get total page count
     total_pages = get_document_page_count(str(path))
@@ -355,4 +357,63 @@ def convert_document_format(
 
     logger.debug(f"Saved converted file to '{out_file}'")
     return str(out_file), conversion_time
+
+def is_ocr_doc(doc_path: Path | str) -> bool:
+    """
+    Take a document path as input and return True if the document needs OCR pipeline for conversion.
+    Heuristics:
+    - Non-PDF formats (e.g. .docx) do not need OCR.
+    - Inspects page text content and image objects using pypdfium2.
+    - If total extractable text across pages is below the minimum threshold (< 20 words/chars per page),
+      or pages contain full-page embedded image scans without digital text, return True.
+    """
+    doc_path = Path(doc_path)
+    if doc_path.suffix.lower() in (".docx", ".doc", ".txt", ".md", ".json", ".csv", ".xlsx", ".pptx"):
+        return False
+
+    try:
+        import pypdfium2.raw as pdfium_c
+
+        pdf_obj = pdfium.PdfDocument(str(doc_path))
+        num_pages = len(pdf_obj)
+        if num_pages == 0:
+            pdf_obj.close()
+            return False
+
+        total_text_len = 0
+        pages_with_images = 0
+
+        # Sample up to first 10 pages for fast decision on large files
+        sample_pages = min(num_pages, 10)
+        for p in range(sample_pages):
+            page = pdf_obj[p]
+            text_page = page.get_textpage()
+            text = text_page.get_text_range()
+            total_text_len += len(text.strip())
+
+            # Check if page contains image objects
+            has_img = any(obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE for obj in page.get_objects())
+            if has_img:
+                pages_with_images += 1
+
+        pdf_obj.close()
+
+        avg_chars_per_page = total_text_len / sample_pages
+
+        # If pages have virtually no digital text (< 50 chars/page) and contain image objects -> scanned document
+        if avg_chars_per_page < 50 and pages_with_images > 0:
+            logger.debug(f"{doc_path.name}: identified as scanned/image document (avg_chars={avg_chars_per_page:.1f}, img_pages={pages_with_images}/{sample_pages}) -> OCR enabled")
+            return True
+
+        # If zero digital text found anywhere in sample -> needs OCR
+        if total_text_len == 0:
+            logger.debug(f"{doc_path.name}: zero digital text found -> OCR enabled")
+            return True
+
+        logger.debug(f"{doc_path.name}: identified as digital document (avg_chars={avg_chars_per_page:.1f}) -> OCR disabled")
+        return False
+
+    except Exception as exc:
+        logger.warning(f"Error checking if {doc_path} is an OCR document: {exc}. Defaulting to OCR enabled.")
+        return True
 
