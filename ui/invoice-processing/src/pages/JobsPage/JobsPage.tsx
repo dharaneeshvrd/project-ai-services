@@ -29,7 +29,7 @@ import {
   TableToolbarSearch,
   Tag,
 } from '@carbon/react';
-import { Renew, Add, DocumentView } from '@carbon/icons-react';
+import { Renew, Add, DocumentView, Image, Document } from '@carbon/icons-react';
 import { listJobs, InvoiceJob } from '../../services/api';
 
 const STATUS_TAG_COLOR: Record<string, 'gray' | 'cool-gray' | 'warm-gray' | 'blue' | 'cyan' | 'teal' | 'purple' | 'green' | 'red' | 'magenta'> = {
@@ -173,7 +173,7 @@ const JobsPage: React.FC = () => {
     id: job.job_id,
     filename: job.filename,
     status: job.status,
-    pipeline_path: job.pipeline_path || 'oneshot',
+    pipeline_path: job.pipeline_path ?? null,
     progress: job.status,
     error: job.error || '—',
     submitted_at: job.submitted_at ? new Date(job.submitted_at).toLocaleString() : '—',
@@ -302,6 +302,24 @@ const JobsPage: React.FC = () => {
                               return (
                                 <TableRow {...rowProps} key={row.id}>
                                   {row.cells.map((cell) => {
+                                    if (cell.info.header === 'pipeline_path') {
+                                      const val: string | null = cell.value;
+                                      if (!val) {
+                                        return <TableCell key={cell.id}>—</TableCell>;
+                                      }
+                                      const isImage = val === 'oneshot';
+                                      return (
+                                        <TableCell key={cell.id}>
+                                          <Tag
+                                            type={isImage ? 'purple' : 'teal'}
+                                            size="sm"
+                                            renderIcon={isImage ? Image : Document}
+                                          >
+                                            {isImage ? 'One-Shot' : 'PDF path'}
+                                          </Tag>
+                                        </TableCell>
+                                      );
+                                    }
                                     if (cell.info.header === 'status') {
                                       const tagColor = STATUS_TAG_COLOR[cell.value] || 'gray';
                                       return (
