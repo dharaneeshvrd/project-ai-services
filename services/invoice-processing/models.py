@@ -3,7 +3,9 @@ Pydantic schemas for the invoice processing service API.
 """
 
 from datetime import datetime
+from math import ceil
 from typing import Any, Generic, List, Literal, Optional, TypeVar
+
 from pydantic import BaseModel, Field
 
 T = TypeVar("T")
@@ -21,14 +23,18 @@ class PaginatedResponse(BaseModel, Generic[T]):
     pagination: PaginationInfo
 
 
-class SubmitInvoiceResponse(BaseModel):
+class InvoiceJobCreatedResponse(BaseModel):
+    """Response body for POST /v1/invoices (202 Accepted)."""
+
     job_id: str
-    input_type: str
-    status: str
+    input_type: Literal["pdf", "image"]
+    status: str = "accepted"
     message: str = "Invoice submitted successfully"
 
 
 class InvoiceJobDetailResponse(BaseModel):
+    """Full job detail — used by GET /v1/invoices/{job_id} and list endpoint."""
+
     job_id: str
     filename: str
     input_type: str
@@ -44,3 +50,5 @@ class InvoiceJobDetailResponse(BaseModel):
     staged_lines: Optional[list[dict[str, Any]]] = None
     interface_ref: Optional[str] = None
     job_metadata: Optional[dict[str, Any]] = None
+
+    model_config = {"from_attributes": True}

@@ -19,18 +19,25 @@ import {
   Tag,
   Tile,
 } from '@carbon/react';
-import { Upload } from '@carbon/icons-react';
+import { Upload, Image, Document } from '@carbon/icons-react';
 import { submitInvoice } from '../../services/api';
 
-const ACCEPTED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.webp', '.bmp'];
+/** Extensions the backend router accepts — must stay in sync with pipeline/router.py */
+const ACCEPTED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.tiff'];
 const ACCEPTED_MIME_TYPES = [
   'application/pdf',
   'image/png',
   'image/jpeg',
   'image/tiff',
-  'image/webp',
-  'image/bmp',
 ];
+
+/** Derive the routing path the backend will use for a given file. */
+function getRoutingPath(file: File): 'One-Shot (image → extract VLM)' | 'PDF path (→ digitize)' | null {
+  const ext = `.${file.name.split('.').pop()?.toLowerCase()}`;
+  if (ext === '.pdf') return 'PDF path (→ digitize)';
+  if (['.png', '.jpg', '.jpeg', '.tiff'].includes(ext)) return 'One-Shot (image → extract VLM)';
+  return null;
+}
 
 const PIPELINE_STEPS = [
   'Document Upload',
@@ -161,7 +168,7 @@ const SubmitPage: React.FC = () => {
 
               <FormGroup legendText="Invoice Document">
                 <p style={{ fontSize: '0.75rem', color: 'var(--cds-text-secondary)', marginBottom: '0.75rem' }}>
-                  Accepted: PDF, PNG, JPG/JPEG, TIFF, WEBP, BMP
+                  Accepted: PDF · PNG · JPG/JPEG · TIFF
                 </p>
                 <FileUploaderDropContainer
                   labelText="Drag and drop a file here, or click to upload"
@@ -177,9 +184,25 @@ const SubmitPage: React.FC = () => {
                       status="edit"
                       onDelete={handleRemoveFile}
                     />
-                    <Tag type="blue" size="sm" style={{ marginTop: '0.5rem' }}>
-                      {(file.size / 1024).toFixed(1)} KB
-                    </Tag>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+                      <Tag type="blue" size="sm">
+                        {(file.size / 1024).toFixed(1)} KB
+                      </Tag>
+                      {(() => {
+                        const path = getRoutingPath(file);
+                        if (!path) return null;
+                        const isPdf = path.startsWith('PDF');
+                        return (
+                          <Tag
+                            type={isPdf ? 'teal' : 'purple'}
+                            size="sm"
+                            renderIcon={isPdf ? Document : Image}
+                          >
+                            {path}
+                          </Tag>
+                        );
+                      })()}
+                    </div>
                   </div>
                 )}
               </FormGroup>
