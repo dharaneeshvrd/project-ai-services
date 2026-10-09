@@ -1,7 +1,6 @@
 """
 Unit tests for api/v1/invoices.py endpoints.
 """
-
 import io
 import asyncio
 from datetime import datetime, timezone
@@ -9,11 +8,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import requests
-
-from app import _register_invoice_schema
-from settings import settings
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -318,36 +312,3 @@ def test_reject_stub_returns_501(client):
     assert resp.status_code == 501
 
 
-# ---------------------------------------------------------------------------
-# Schema registration (kept from scaffold)
-# ---------------------------------------------------------------------------
-
-def test_register_schema_success():
-    with patch.object(settings.invoice, "extract_url", "http://extract-test:6000"):
-        mock_resp = MagicMock(status_code=201)
-        with patch("requests.post", return_value=mock_resp) as mock_post:
-            _register_invoice_schema()
-            mock_post.assert_called_once()
-
-
-def test_register_schema_idempotent_409():
-    with patch.object(settings.invoice, "extract_url", "http://extract-test:6000"):
-        mock_resp = MagicMock(status_code=409)
-        with patch("requests.post", return_value=mock_resp) as mock_post:
-            _register_invoice_schema()
-            mock_post.assert_called_once()
-
-
-def test_register_schema_failure_raises():
-    with patch.object(settings.invoice, "extract_url", "http://extract-test:6000"):
-        mock_resp = MagicMock(status_code=500, text="Internal Server Error")
-        with patch("requests.post", return_value=mock_resp):
-            with pytest.raises(RuntimeError, match="Failed to register invoice schema"):
-                _register_invoice_schema()
-
-
-def test_register_schema_network_error_raises():
-    with patch.object(settings.invoice, "extract_url", "http://extract-test:6000"):
-        with patch("requests.post", side_effect=requests.RequestException("Connection refused")):
-            with pytest.raises(RuntimeError, match="Network error connecting to extract service"):
-                _register_invoice_schema()

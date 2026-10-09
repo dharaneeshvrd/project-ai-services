@@ -24,6 +24,7 @@ from models import (
 from pipeline.oneshot_path import run_oneshot_path
 from pipeline.pdf_path import run_pdf_path
 from pipeline.router import detect_input_type
+from schema_registration import ensure_invoice_schema_registered
 from settings import settings
 
 logger = get_logger("api.v1.invoices")
@@ -104,6 +105,9 @@ async def submit_invoice(
 
     Returns **202 Accepted** immediately with the new ``job_id``.
     """
+    # Lazily register the extraction schema with the extract service on first submission.
+    await ensure_invoice_schema_registered()
+
     try:
         input_type = detect_input_type(file.filename or "")
     except ValueError as exc:
