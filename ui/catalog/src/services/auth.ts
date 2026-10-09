@@ -14,10 +14,10 @@ export const login = async (payload: LoginRequest): Promise<LoginResponse> => {
   const refreshToken = response.data.refresh_token;
   useAuthStore.getState().setTokens(accessToken, refreshToken);
 
-  // Fetch architectures if not in store
-  const deployStore = useDeployStore.getState();
-
-  if (deployStore.architectures.length === 0) {
+  // Pre-fetch architectures in the background.
+  void (async () => {
+    const deployStore = useDeployStore.getState();
+    if (deployStore.architectures.length > 0) return;
     try {
       deployStore.setArchitecturesLoading(true);
       const architectures = await fetchArchitectures();
@@ -29,7 +29,7 @@ export const login = async (payload: LoginRequest): Promise<LoginResponse> => {
           : "Failed to fetch architectures";
       deployStore.setArchitecturesError(errorMessage);
     }
-  }
+  })();
 
   return response.data;
 };
