@@ -38,7 +38,7 @@ import { useWorkers } from "@/hooks/useWorkers";
 
 const BASE_STEPS = [
   {
-    label: "Provide assistant details",
+    label: "Provide details",
     description: "Configure basic settings",
   },
   {
@@ -49,7 +49,7 @@ const BASE_STEPS = [
 
 const DATASOURCE_STEP = {
   label: "Select data sources",
-  description: "Connect data sources to your assistant",
+  description: "Connect data sources to your deployment",
 };
 
 const STEP_ONE = 0;
@@ -60,31 +60,46 @@ const getInitialState = (formData: DeployFormData): BaseDeployFlowState => ({
   formData,
 });
 
-const daDeployFlowReducer = (
-  state: BaseDeployFlowState,
-  action: DeployFlowAction,
-): BaseDeployFlowState => {
-  switch (action.type) {
-    case ACTION_TYPES.RESET_STATE:
-      return getInitialState({
-        name: "Digital assistant (copy)",
-        version: "",
-        globalComponents: {},
-        services: {},
-        ...DEFAULT_FORM_DATA,
-        dataSources: [],
-        uploadFromSourceEnabled: false,
-      });
-    default:
-      return sharedDeployFlowReducer(state, action);
-  }
-};
+const getDefaultName = (entityLabel: string) =>
+  `${entityLabel.charAt(0).toUpperCase()}${entityLabel.slice(1)} (copy)`;
+
+const createDeployFlowReducer =
+  (defaultName: string) =>
+  (
+    state: BaseDeployFlowState,
+    action: DeployFlowAction,
+  ): BaseDeployFlowState => {
+    switch (action.type) {
+      case ACTION_TYPES.RESET_STATE:
+        return getInitialState({
+          name: defaultName,
+          version: "",
+          globalComponents: {},
+          services: {},
+          ...DEFAULT_FORM_DATA,
+          dataSources: [],
+          uploadFromSourceEnabled: false,
+        });
+      default:
+        return sharedDeployFlowReducer(state, action);
+    }
+  };
+
+export interface ArchitectureDeployFlowProps extends BaseDeployFlowProps {
+  /** Catalog architecture to deploy. */
+  architectureId: string;
+  /** Singular lower-case name used in the default deployment name and title. */
+  entityLabel: string;
+}
 
 export const DeployFlow = ({
   open,
   onClose,
   onSubmit,
-}: BaseDeployFlowProps) => {
+  architectureId,
+  entityLabel,
+}: ArchitectureDeployFlowProps) => {
+  const defaultName = getDefaultName(entityLabel);
   const [hasStep1SchemaError, setHasStep1SchemaError] = useState(false);
   const [hasStep2SchemaError, setHasStep2SchemaError] = useState(false);
   const [hasStep3SchemaError, setHasStep3SchemaError] = useState(false);
@@ -114,13 +129,17 @@ export const DeployFlow = ({
   const initialState = useMemo(
     () =>
       getInitialState({
-        name: "Digital assistant (copy)",
+        name: defaultName,
         version: "",
         globalComponents: {},
         services: {},
         ...DEFAULT_FORM_DATA,
       }),
-    [],
+    [defaultName],
+  );
+  const daDeployFlowReducer = useMemo(
+    () => createDeployFlowReducer(defaultName),
+    [defaultName],
   );
   const [state, dispatch] = useReducer(daDeployFlowReducer, initialState);
   const hasInitialized = useRef(false);
@@ -128,7 +147,7 @@ export const DeployFlow = ({
   const runtime = state.formData.deploymentType;
 
   const { deployOptions, isLoading, isProviderParamsLoading, error } =
-    useDeployOptions(open, runtime);
+    useDeployOptions(open, runtime, architectureId);
 
   const hasDatasourceStep = useMemo(
     () =>
@@ -207,13 +226,13 @@ export const DeployFlow = ({
   useEffect(() => {
     if (open && deployOptions && !hasInitialized.current) {
       hasInitialized.current = true;
-      const formData = initializeFormData(deployOptions);
+      const formData = initializeFormData(deployOptions, defaultName);
       dispatch({
         type: ACTION_TYPES.SET_FORM_DATA,
         payload: formData,
       });
     }
-  }, [open, deployOptions]);
+  }, [open, deployOptions, defaultName]);
 
   const {
     handleNext,
@@ -355,7 +374,7 @@ export const DeployFlow = ({
     <DeployTearsheetShell
       open={open}
       onClose={handleClose}
-      title="Deploy digital assistant"
+      title={`Deploy ${entityLabel}`}
       steps={steps}
       currentStep={state.currentStep}
       isLastStep={isLastStep}
@@ -373,7 +392,7 @@ export const DeployFlow = ({
     >
       {state.currentStep === STEP_ONE && deployOptions && (
         <StepOne
-          title="Provide assistant details"
+          title="Provide details"
           formData={state.formData}
           onChange={handleFormDataChange}
           deployOptions={deployOptions}
@@ -383,6 +402,7 @@ export const DeployFlow = ({
           onWorkerErrorReset={handleWorkerErrorReset}
           onComponentError={setHasStep1SchemaError}
           runtime={runtime}
+          entityLabel={entityLabel}
           workers={workers}
           isLoadingWorkers={isLoadingWorkers}
           refetchWorkers={refetchWorkers}

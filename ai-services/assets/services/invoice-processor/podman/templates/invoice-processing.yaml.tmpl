@@ -1,0 +1,120 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "invoice-processing-{{ .InstanceSlug }}"
+  labels:
+    ai-services.io/template: "{{ .TemplateID }}"
+    ai-services.io/volume: "invoice-processing-cache-{{ .InstanceSlug }}"
+  annotations:
+    ai-services.io/routes: "4101:invoice-processing-ui-{{ .InstanceSlug }}:ui,4100:invoice-processing-backend-{{ .InstanceSlug }}:api"
+    # ai-services.io/ports: "4101:4101, 4100:4100"  # Uncomment to expose ports directly (bypasses Caddy)
+    io.podman.annotations.pids-limit/backend-server: "4096"
+spec:
+  initContainers:
+    - name: invoice-processing-db-init
+      image: "{{ .Values.invoiceProcessing.image }}"
+      command:
+        - "/bin/sh"
+        - "-c"
+      args:
+        - |
+          export POSTGRES_USER=$(cat /etc/secret/invoice-processing-db-secret/username)
+          export POSTGRES_PASSWORD=$(cat /etc/secret/invoice-processing-db-secret/password)
+          exec /var/venv/bin/python db/scripts/init_db.py
+      env:
+        - name: POSTGRES_HOST
+          value: "invoice-processing-db-{{ .InstanceSlug }}"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          value: "{{ .Values.invoiceProcessing.database }}"
+      volumeMounts:
+        - mountPath: /etc/secret/invoice-processing-db-secret
+          name: invoice-processing-db-secret
+          readOnly: true
+  containers:
+    - name: ui
+      image: "{{ .Values.invoiceProcessingUi.image }}"
+      resources:
+        requests:
+          memory: "512Mi"
+        limits:
+          memory: "512Mi"
+      env:
+        - name: BACKEND_HOST
+          value: "invoice-processing-{{ .InstanceSlug }}"
+        - name: BACKEND_PORT
+          value: "4100"
+      ports:
+        - containerPort: 4101
+          protocol: TCP
+      livenessProbe:
+        httpGet:
+          path: /
+          port: 4101
+        initialDelaySeconds: 10
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+    - name: backend-server
+      image: "{{ .Values.invoiceProcessing.image }}"
+      command:
+        - "/bin/sh"
+        - "-c"
+      args:
+        - |
+          export POSTGRES_USER=$(cat /etc/secret/invoice-processing-db-secret/username)
+          export POSTGRES_PASSWORD=$(cat /etc/secret/invoice-processing-db-secret/password)
+          exec /var/venv/bin/python -m uvicorn app:app \
+            --host 0.0.0.0 \
+            --port 4100 \
+            --loop uvloop \
+            --http httptools
+      ports:
+        - containerPort: 4100
+          name: http
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 4100
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+      resources:
+        requests:
+          memory: "4Gi"
+        limits:
+          memory: "4Gi"
+      env:
+        - name: POSTGRES_HOST
+          value: "invoice-processing-db-{{ .InstanceSlug }}"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          value: "{{ .Values.invoiceProcessing.database }}"
+        - name: DB_POOL_SIZE
+          value: "5"
+        - name: DB_MAX_OVERFLOW
+          value: "5"
+        # Peer services of the invoice-processing architecture share this application's instance slug.
+        - name: DIGITIZE_URL
+          value: "http://digitize-{{ .InstanceSlug }}:4000"
+        - name: EXTRACT_URL
+          value: "http://extract-api-{{ .InstanceSlug }}:9500"
+        - name: LOG_LEVEL
+          value: "{{ .Values.invoiceProcessing.log_level }}"
+      volumeMounts:
+        - mountPath: /var/cache:z
+          name: cache
+        - mountPath: /etc/secret/invoice-processing-db-secret
+          name: invoice-processing-db-secret
+          readOnly: true
+  restartPolicy: Always
+  volumes:
+    - name: cache
+      persistentVolumeClaim:
+        claimName: "invoice-processing-cache-{{ .InstanceSlug }}"
+    - name: invoice-processing-db-secret
+      secret:
+        secretName: "invoice-processing-db-secret-{{ .InstanceSlug }}"

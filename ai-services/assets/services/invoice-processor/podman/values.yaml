@@ -1,0 +1,15 @@
+invoiceProcessing:
+  image: icr.io/ai-services-cicd/invoice-processing-service:v0.0.1
+  log_level: "INFO"
+  database: "invoice_processing_metadata"
+
+invoiceProcessingUi:
+  image: icr.io/ai-services-cicd/invoice-processing-ui:v0.0.1
+
+postgres:
+  image: icr.io/ai-services-cicd/postgres:18-6
+  username: "postgres"
+  # @generate:password
+  password: ""
+
+# Made with Bob

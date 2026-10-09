@@ -1,0 +1,8 @@
+containers:
+  - name: "invoice-processing-{{ .InstanceSlug }}-ui"
+    format: ".Status"
+    alias: UI_STATUS
+
+  - name: "invoice-processing-{{ .InstanceSlug }}-backend-server"
+    format: ".Status"
+    alias: API_STATUS

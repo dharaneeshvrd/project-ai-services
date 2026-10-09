@@ -261,7 +261,8 @@ export interface ApplicationDetailsApiResponse {
     type: string;
     catalog_id: string;
     version: string;
-    components: Array<{
+    // Omitted by the API (omitempty) when a service has no components/endpoints
+    components?: Array<{
       type: string;
       provider: {
         id: string;
@@ -269,7 +270,7 @@ export interface ApplicationDetailsApiResponse {
       };
       metadata?: { model?: string };
     }>;
-    endpoints: Array<{
+    endpoints?: Array<{
       type: string;
       url: string;
     }>;

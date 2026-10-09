@@ -45,7 +45,7 @@ func HelmReleaseName(appID uuid.UUID, id string) string {
 // DeployingStatusMessage returns the human-readable deploying status message.
 func DeployingStatusMessage(isArchitecture bool) string {
 	if isArchitecture {
-		return "Deploying digital assistant"
+		return "Deploying architecture"
 	}
 
 	return "Deploying service"

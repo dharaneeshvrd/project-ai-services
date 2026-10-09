@@ -6,6 +6,7 @@ import AuthLayout from "./layouts/AuthLayout";
 import Login from "./pages/Login";
 import Logout from "./pages/Logout";
 import DigitalAssistantsPage from "./pages/DigitalAssistants";
+import { INVOICE_PROCESSING_CONFIG } from "./pages/DigitalAssistants/architectureConfigs";
 import Services from "./pages/Services";
 import Connectors from "./pages/Connectors";
 import WorkerResources from "./pages/WorkerResources";
@@ -29,6 +30,12 @@ function App() {
               <Route
                 path={ROUTES.DIGITAL_ASSISTANTS}
                 element={<DigitalAssistantsPage />}
+              />
+              <Route
+                path={ROUTES.INVOICE_PROCESSING}
+                element={
+                  <DigitalAssistantsPage config={INVOICE_PROCESSING_CONFIG} />
+                }
               />
               <Route path={ROUTES.SERVICES} element={<Services />} />
               <Route path={ROUTES.CONNECTORS} element={<Connectors />} />

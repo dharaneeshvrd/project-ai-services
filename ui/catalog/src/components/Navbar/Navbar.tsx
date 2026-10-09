@@ -44,6 +44,10 @@ const Navbar = (props: NavbarProps) => {
             Digital assistants
           </SideNavMenuItem>
 
+          <SideNavMenuItem as={NavLink} to={ROUTES.INVOICE_PROCESSING}>
+            Invoice processing
+          </SideNavMenuItem>
+
           <SideNavMenuItem as={NavLink} to={ROUTES.SERVICES}>
             Services
           </SideNavMenuItem>

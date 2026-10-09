@@ -8,6 +8,10 @@ type: service
 # Certification and support
 certified_by: "IBM"
 
+# Service belongs to these architectures
+architectures:
+  - invoice-processing
+
 # Dependencies on other components
 dependencies:
   - id: llm

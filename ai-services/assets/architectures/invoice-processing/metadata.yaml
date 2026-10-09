@@ -1,0 +1,58 @@
+# Architecture identification
+id: invoice-processing
+name: "Invoice processing"
+description: "Automates end-to-end invoice handling by digitizing PDF and image invoices, extracting structured data with an LLM, and loading the results into a target ERP or database system."
+version: "1.0.0"
+type: architecture
+
+# Certification and support
+certified_by: "IBM"
+runtimes:
+  - podman
+
+# Global components shared across all services
+# These components are deployed once and reused by all services
+# (the digitize service stores document chunks in the vector store).
+# The LLM is a per-service dependency of the digitize and extract services.
+global_components:
+  - type: vector_store
+  - type: embedding
+
+# Service composition (version is optional, uses latest if not specified)
+services:
+  - id: invoice-processor
+    version: ">=1.0.0"
+
+  - id: digitize
+    version: ">=1.0.0"
+
+  - id: extract
+    version: ">=1.0.0"
+
+about:
+  - title: "Services"
+    values:
+      - "Invoice Processing"
+      - "Digitize Documents"
+      - "Extract Information"
+
+  - title: "Use case domains"
+    sections:
+      - title: "Enterprise resource planning"
+        values:
+          - "Accounts payable automation"
+          - "Invoice data entry"
+      - title: "Banking"
+        values:
+          - "Trade finance document processing"
+      - title: "Public sector"
+        values:
+          - "Procurement document processing"
+
+  - title: "Code and architecture"
+    sections:
+      - title: "Source code"
+        ctaLabel: "View source code"
+        url: "https://github.com/IBM/project-ai-services"
+
+# Made with Bob

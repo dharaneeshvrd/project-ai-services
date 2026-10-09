@@ -49,6 +49,8 @@ interface DeploymentDetailsProps {
   deployment: DeploymentDetailsType;
   onBack: () => void;
   deploymentSource: string;
+  /** Set for architecture deployments; omitted for service deployments. */
+  architectureId?: string;
   onNameUpdate?: (newName: string) => void;
   /** Pre-select a side-nav section when the panel opens */
   defaultSection?: "details" | "services" | "integration" | "datasources";
@@ -58,6 +60,7 @@ const DeploymentDetails = ({
   deployment,
   onBack,
   deploymentSource,
+  architectureId,
   onNameUpdate,
   defaultSection = "details",
 }: DeploymentDetailsProps) => {
@@ -70,7 +73,7 @@ const DeploymentDetails = ({
     acceptsDatasource,
     error: datasourceSupportError,
     clearError: clearDatasourceSupportError,
-  } = useDeploymentDatasourceSupport(deploymentSource, deployedCatalogIds);
+  } = useDeploymentDatasourceSupport(architectureId, deployedCatalogIds);
   const [isLoadingResources, setIsLoadingResources] = useState(false);
   const [serviceData, setServiceData] = useState<DeploymentServiceData[]>([]);
   const [integrationEndpoints, setIntegrationEndpoints] = useState<
@@ -208,38 +211,39 @@ const DeploymentDetails = ({
           deploymentServices.map((s) => s.catalog_id).filter(Boolean),
         );
 
-        const isDeploymentCertified =
-          deployment.type === "Digital Assistant"
-            ? deploymentServices.length > 0 &&
-              deploymentServices.every(
-                (service) =>
-                  serviceMetadataById[service.catalog_id]?.certifiedBy ===
-                  "IBM",
-              )
-            : deploymentServices.length > 0 &&
-              serviceMetadataById[deploymentServices[0].catalog_id]
-                ?.certifiedBy === "IBM";
+        const isDeploymentCertified = architectureId
+          ? deploymentServices.length > 0 &&
+            deploymentServices.every(
+              (service) =>
+                serviceMetadataById[service.catalog_id]?.certifiedBy === "IBM",
+            )
+          : deploymentServices.length > 0 &&
+            serviceMetadataById[deploymentServices[0].catalog_id]
+              ?.certifiedBy === "IBM";
         const knownComponentTypes = new Set<string>(
           Object.values(COMPONENT_TYPES),
         );
 
         const transformedServices: DeploymentServiceData[] =
           deploymentServices.map((service) => {
-            const llmComponent = service.components.find(
+            // Services without component dependencies (e.g. invoice-processor)
+            // may omit `components` entirely from the API response.
+            const serviceComponents = service.components ?? [];
+            const llmComponent = serviceComponents.find(
               (c) => c.type === COMPONENT_TYPES.LLM,
             );
-            const embeddingComponent = service.components.find(
+            const embeddingComponent = serviceComponents.find(
               (c) => c.type === COMPONENT_TYPES.EMBEDDING,
             );
-            const vectorStoreComponent = service.components.find(
+            const vectorStoreComponent = serviceComponents.find(
               (c) => c.type === COMPONENT_TYPES.VECTOR_STORE,
             );
-            const rerankerComponent = service.components.find(
+            const rerankerComponent = serviceComponents.find(
               (c) => c.type === COMPONENT_TYPES.RERANKER,
             );
 
             // Collect custom/unknown component types not handled by the known set.
-            const customComponents = service.components
+            const customComponents = serviceComponents
               .filter((c) => !knownComponentTypes.has(c.type))
               .map((c) => ({
                 label: c.type
@@ -284,8 +288,9 @@ const DeploymentDetails = ({
 
         const transformedEndpoints: DeployIntegrationEndpoints[] =
           deploymentServices.map((service) => {
-            const uiEndpoint = service.endpoints.find((e) => e.type === "ui");
-            const apiEndpoint = service.endpoints.find((e) => e.type === "api");
+            const serviceEndpoints = service.endpoints ?? [];
+            const uiEndpoint = serviceEndpoints.find((e) => e.type === "ui");
+            const apiEndpoint = serviceEndpoints.find((e) => e.type === "api");
             const serviceDescription =
               serviceMetadataById[service.catalog_id]?.description ??
               `${service.type} service`;
@@ -299,7 +304,7 @@ const DeploymentDetails = ({
               apiDocumentation: apiEndpoint?.url
                 ? `${apiEndpoint.url}/docs`
                 : "",
-              interactiveAPIs: service.endpoints
+              interactiveAPIs: serviceEndpoints
                 .filter((endpoint) => endpoint.type === "ui")
                 .map((endpoint) => endpoint.url),
             };
@@ -322,7 +327,7 @@ const DeploymentDetails = ({
     };
 
     fetchServiceDetails();
-  }, [deployment.id, deployment.type]);
+  }, [deployment.id, architectureId]);
 
   const STATUS_CONFIG = {
     Initializing: {

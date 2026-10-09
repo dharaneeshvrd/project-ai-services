@@ -20,13 +20,12 @@ export interface DeploymentDatasourceSupportResult {
 }
 
 export function useDeploymentDatasourceSupport(
-  deploymentSource: string,
+  architectureId: string | undefined,
   catalogIds: string[] | undefined,
 ): DeploymentDatasourceSupportResult {
-  const isDA = deploymentSource === "Digital assistants";
-  const selectedArchitectureId = useDeployStore(
-    (s) => s.selectedArchitectureId,
-  );
+  // Architecture deployments pass their architecture ID; services pass none.
+  const isDA = !!architectureId;
+  const selectedArchitectureId = architectureId;
 
   const getDeployOptionsRef = useRef(
     useDeployStore.getState().getDeployOptions,

@@ -8,10 +8,15 @@ import { dedupe } from "@/utils/requestManager";
 import type { AboutSection } from "@/types/api.types";
 
 interface AboutTabProps {
+  /** Catalog architecture whose About content is shown. */
+  architectureId: string;
   onDeployClick: () => void;
 }
 
-export const AboutTab: React.FC<AboutTabProps> = ({ onDeployClick }) => {
+export const AboutTab: React.FC<AboutTabProps> = ({
+  architectureId: selectedArchitectureId,
+  onDeployClick,
+}) => {
   const architectureDetails = useDeployStore(
     (state) => state.architectureDetails,
   );
@@ -20,9 +25,6 @@ export const AboutTab: React.FC<AboutTabProps> = ({ onDeployClick }) => {
   );
   const architectureDetailsError = useDeployStore(
     (state) => state.architectureDetailsError,
-  );
-  const selectedArchitectureId = useDeployStore(
-    (state) => state.selectedArchitectureId,
   );
   const setArchitectureDetails = useDeployStore(
     (state) => state.setArchitectureDetails,
@@ -243,8 +245,13 @@ export const AboutTab: React.FC<AboutTabProps> = ({ onDeployClick }) => {
     return null;
   };
 
-  // Loading state
-  if (architectureDetailsLoading) {
+  // Loading state — also covers the cached details belonging to a different
+  // architecture while the details for this one are being fetched.
+  const isOtherArchitectureCached =
+    !!architectureDetails &&
+    architectureDetails.id !== selectedArchitectureId &&
+    !architectureDetailsError;
+  if (architectureDetailsLoading || isOtherArchitectureCached) {
     return (
       <div className={styles.aboutContent}>
         <Layer withBackground>

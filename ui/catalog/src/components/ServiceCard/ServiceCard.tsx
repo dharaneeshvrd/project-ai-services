@@ -24,7 +24,7 @@ const ServiceCard = ({
 
   const handleSecondaryButtonClick = () => {
     if (!isPartOfDigitalAssistants) {
-      // For digital assistant services, open the side panel
+      // For architecture-only services, open the side panel
       onLearnMore?.(id);
     } else {
       // For other services, open the deploy flow
@@ -39,7 +39,7 @@ const ServiceCard = ({
         primaryButtonText={" "}
         secondaryButtonIcon={!isPartOfDigitalAssistants ? undefined : Deploy}
         secondaryButtonText={
-          !isPartOfDigitalAssistants ? "Part of digital assistants" : "Deploy"
+          !isPartOfDigitalAssistants ? "Part of an architecture" : "Deploy"
         }
         onPrimaryButtonClick={() => onLearnMore?.(id)}
         onClick={() => onLearnMore?.(id)}

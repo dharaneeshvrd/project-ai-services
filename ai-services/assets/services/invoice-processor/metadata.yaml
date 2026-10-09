@@ -1,0 +1,69 @@
+# Service identification
+id: invoice-processor
+version: "1.0.0"
+name: "Invoice processing"
+description: "Automates end-to-end invoice handling by extracting structured data from PDF and image invoices and loading results into a target ERP or database system."
+type: service
+
+# Certification and support
+certified_by: "IBM"
+
+# Service belongs to these architectures
+architectures:
+  - invoice-processing
+
+# The invoice processor delegates LLM inference to the extract service and
+# does not depend on any component directly.
+standalone: false
+
+# About field containing detailed service information
+about:
+  - title: "Service details"
+    sections:
+      - title: "Version"
+        value: "1.0.0"
+  - title: "Inputs and outputs"
+    sections:
+      - title: "Inputs"
+        values:
+          - "Invoice files (PDF or image)"
+      - title: "Outputs"
+        values:
+          - "Structured invoice data (JSON)"
+          - "DB load status"
+
+  - title: "Dependencies and integration"
+    sections:
+      - title: "Services in the invoice processing architecture"
+        values:
+          - "Digitize service (converts PDF and scanned invoice pages to text)"
+          - "Extract service (performs LLM-based structured field extraction)"
+
+  - title: "Content and format support"
+    sections:
+      - title: "Languages"
+        values:
+          - "English"
+      - title: "Document formats"
+        values:
+          - "PDF"
+          - "PNG / JPEG"
+
+  - title: "Expected resource consumption"
+    sections:
+      - title: "per 5 concurrent users"
+        values:
+          - title: "Compute"
+            value: "2 CPU cores"
+          - title: "Memory"
+            value: "4.50 GB"
+          - title: "Storage"
+            value: "10.00 GB"
+
+  - title: "Assets"
+    sections:
+      - title: "Source code"
+        ctaLabel: "View source code"
+        url: "https://github.com/IBM/project-ai-services"
+
+# Made with Bob

@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -44,6 +45,11 @@ func TestLoadArchitecture(t *testing.T) {
 			wantErr:        false,
 		},
 		{
+			name:           "Load invoice-processing architecture",
+			architectureID: "invoice-processing",
+			wantErr:        false,
+		},
+		{
 			name:           "Load non-existent architecture",
 			architectureID: "non-existent",
 			wantErr:        true,
@@ -68,6 +74,55 @@ func TestLoadArchitecture(t *testing.T) {
 				t.Logf("LoadArchitecture(%s): Expected error received in %v", tt.architectureID, elapsed)
 			}
 		})
+	}
+}
+func TestInvoiceProcessingArchitectureDeployOptions(t *testing.T) {
+	base, err := NewCatalogProvider(nil)
+	if err != nil {
+		t.Fatalf("Failed to create catalog provider: %v", err)
+	}
+
+	provider, err := base.WithRuntime("podman")
+	if err != nil {
+		t.Fatalf("Failed to scope provider to podman runtime: %v", err)
+	}
+
+	opts, err := provider.GetArchitectureDeployOptions(context.Background(), "invoice-processing")
+	if err != nil {
+		t.Fatalf("GetArchitectureDeployOptions() error = %v", err)
+	}
+
+	// Expected components required by each member service.
+	wantComponents := map[string][]string{
+		"invoice-processor": {},
+		"digitize":          {"vector_store", "embedding", "llm"},
+		"extract":           {"llm"},
+	}
+
+	if len(opts.Services) != len(wantComponents) {
+		t.Fatalf("expected %d services, got %d", len(wantComponents), len(opts.Services))
+	}
+
+	for _, svc := range opts.Services {
+		want, ok := wantComponents[svc.ID]
+		if !ok {
+			t.Errorf("unexpected service %q in invoice-processing architecture", svc.ID)
+
+			continue
+		}
+
+		got := make(map[string]bool, len(svc.Components))
+		for _, c := range svc.Components {
+			got[c.Type] = true
+		}
+		if len(got) != len(want) {
+			t.Errorf("service %q: expected components %v, got %v", svc.ID, want, got)
+		}
+		for _, w := range want {
+			if !got[w] {
+				t.Errorf("service %q: missing component %q", svc.ID, w)
+			}
+		}
 	}
 }
 
