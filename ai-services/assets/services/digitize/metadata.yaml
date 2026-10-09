@@ -11,6 +11,7 @@ certified_by: "IBM"
 # Service belongs to these architectures
 architectures:
   - rag
+  - invoice-processing
 
 # Dependencies on other components
 dependencies:

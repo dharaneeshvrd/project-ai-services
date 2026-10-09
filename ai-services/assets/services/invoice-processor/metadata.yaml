@@ -1,5 +1,5 @@
 # Service identification
-id: invoice-processing
+id: invoice-processor
 version: "1.0.0"
 name: "Invoice processing"
 description: "Automates end-to-end invoice handling by extracting structured data from PDF and image invoices and loading results into a target ERP or database system."
@@ -10,13 +10,11 @@ certified_by: "IBM"
 
 # Service belongs to these architectures
 architectures:
-  - rag
+  - invoice-processing
 
-# Dependencies on other components
-dependencies:
-  - id: llm
-
-standalone: true
+# The invoice processor delegates LLM inference to the extract service and
+# does not depend on any component directly.
+standalone: false
 
 # About field containing detailed service information
 about:
@@ -24,14 +22,6 @@ about:
     sections:
       - title: "Version"
         value: "1.0.0"
-      - title: "Large language model (LLM)"
-        value: "granite-3.3-8b-instruct"
-      - title: "Inference backend"
-        values:
-          - "Red Hat AI Inference with Spyre"
-          - "AI Inference on CPU"
-          - "IBM watsonx.ai on IBM Cloud"
-
   - title: "Inputs and outputs"
     sections:
       - title: "Inputs"
@@ -44,11 +34,10 @@ about:
 
   - title: "Dependencies and integration"
     sections:
-      - title: "External dependencies"
+      - title: "Services in the invoice processing architecture"
         values:
-          - "Digitize service (required for PDF invoices — converts scanned pages to text)"
-          - "Extract service (required — performs structured field extraction)"
-          - "Inferencing endpoint compatible with OpenAI or similar AI APIs (required for LLM-based extraction)"
+          - "Digitize service (converts PDF and scanned invoice pages to text)"
+          - "Extract service (performs LLM-based structured field extraction)"
 
   - title: "Content and format support"
     sections:

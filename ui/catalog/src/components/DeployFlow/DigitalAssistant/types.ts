@@ -20,6 +20,8 @@ export interface StepProps extends BaseStepProps {
   deployOptions: DeployOptionsResponse;
   providerParamsByType: Record<string, Record<string, ProviderSchema>>;
   runtime?: string;
+  /** Singular lower-case name of the architecture, e.g. "digital assistant". */
+  entityLabel: string;
   workers: WorkerApiResponse[];
   isLoadingWorkers: boolean;
   refetchWorkers: () => void;

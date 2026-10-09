@@ -29,6 +29,10 @@ import {
 } from "@carbon/react";
 import { Deploy } from "@carbon/icons-react";
 import styles from "./DigitalAssistants.module.scss";
+import {
+  DIGITAL_ASSISTANTS_CONFIG,
+  type ArchitecturePageConfig,
+} from "./architectureConfigs";
 import type { DigitalAssistantRow } from "./types";
 import {
   ACTION_TYPES,
@@ -110,28 +114,31 @@ const renderCell = ({
   );
 };
 
-const DigitalAssistantsPage = () => {
+interface ArchitecturePageProps {
+  /** Which architecture this page lists and deploys. Defaults to digital assistants. */
+  config?: ArchitecturePageConfig;
+}
+
+const DigitalAssistantsPage = ({
+  config = DIGITAL_ASSISTANTS_CONFIG,
+}: ArchitecturePageProps) => {
   const [state, dispatch] = useReducer(appReducer, INITIAL_STATE);
 
-  // Get architecture data from store for dynamic title, subtitle, and catalogId.
+  // Get architecture data from store for dynamic title and subtitle.
   const architectures = useDeployStore((state) => state.architectures);
-  const selectedArchitectureId = useDeployStore(
-    (state) => state.selectedArchitectureId,
-  );
 
-  // catalogId is the selected architecture's ID — already available in the store.
-  const catalogId = selectedArchitectureId ?? undefined;
+  // catalogId is the architecture this page is bound to.
+  const catalogId = config.architectureId;
 
-  // Find the selected architecture to get name and description
+  // Find the architecture to get name and description
   const selectedArchitecture = architectures.find(
-    (arch) => arch.id === selectedArchitectureId,
+    (arch) => arch.id === catalogId,
   );
 
   // Use architecture data or fallback to defaults
-  const pageTitle = selectedArchitecture?.name || "Digital assistants";
+  const pageTitle = selectedArchitecture?.name || config.fallbackTitle;
   const pageSubtitle =
-    selectedArchitecture?.description ||
-    "Production-ready tools that help users complete tasks and access information through conversation or commands. Assistants integrate multiple services for complex use cases and support retrieval-augmented generation (RAG).";
+    selectedArchitecture?.description || config.fallbackSubtitle;
 
   // Refs mirror state.page/pageSize and are updated inline on every render
 
@@ -220,7 +227,7 @@ const DigitalAssistantsPage = () => {
     if (!state.selectedRowId) {
       dispatch({
         type: "SHARED_SHOW_ERROR",
-        payload: { message: "No digital assistant selected for deletion" },
+        payload: { message: `No ${config.entityLabel} selected for deletion` },
       });
       return;
     }
@@ -236,7 +243,7 @@ const DigitalAssistantsPage = () => {
       const msg =
         err instanceof Error
           ? err.message
-          : "Failed deleting digital assistant";
+          : `Failed deleting ${config.entityLabel}`;
       const name =
         state.rowsData.find((r) => r.id === state.selectedRowId)?.name ?? "";
       dispatch({
@@ -312,7 +319,7 @@ const DigitalAssistantsPage = () => {
         id: row.id,
         name: row.name,
         status: row.status,
-        type: row.type || "Digital assistant",
+        type: row.type || config.fallbackTitle,
       },
       defaultSection: "integration",
     } as AppAction);
@@ -323,44 +330,54 @@ const DigitalAssistantsPage = () => {
     Record<string, { url: string } | { error: string } | undefined>
   >({});
 
-  const handleMenuOpen = useCallback(async (rowId: string) => {
-    const cached = endpointCacheRef.current[rowId];
-    if (cached && "url" in cached) return;
-    try {
-      const response = await api.get<ApplicationDetailsApiResponse>(
-        APPLICATION_ENDPOINTS.GET_APPLICATION_DETAILS(rowId),
-      );
-      const uiEndpoint = response.data.services
-        ?.find((s) => s.catalog_id === "chat")
-        ?.endpoints?.find((e) => e.type === "ui")?.url;
-      endpointCacheRef.current[rowId] = uiEndpoint
-        ? { url: uiEndpoint }
-        : { error: "No chatbot UI endpoint is available for this deployment." };
-    } catch {
-      endpointCacheRef.current[rowId] = {
-        error: "Could not retrieve the chatbot endpoint. Please try again.",
-      };
-    }
-  }, []);
+  const { launchServiceId, launchTargetLabel } = config;
 
-  const handleLaunchEndpointForRow = useCallback((rowId: string) => {
-    const cached = endpointCacheRef.current[rowId];
-    if (cached && "url" in cached) {
-      window.open(cached.url, "_blank", "noopener,noreferrer");
-    } else if (cached && "error" in cached) {
-      dispatch({
-        type: ACTION_TYPES.SHOW_LAUNCH_ERROR_TOAST,
-        payload: cached.error,
-      } as AppAction);
-    } else {
-      // Prefetch not yet complete — should not be reachable since the item is
-      // disabled while isPrefetching, but guard defensively.
-      dispatch({
-        type: ACTION_TYPES.SHOW_LAUNCH_ERROR_TOAST,
-        payload: "Could not retrieve the chatbot endpoint. Please try again.",
-      } as AppAction);
-    }
-  }, []);
+  const handleMenuOpen = useCallback(
+    async (rowId: string) => {
+      const cached = endpointCacheRef.current[rowId];
+      if (cached && "url" in cached) return;
+      try {
+        const response = await api.get<ApplicationDetailsApiResponse>(
+          APPLICATION_ENDPOINTS.GET_APPLICATION_DETAILS(rowId),
+        );
+        const uiEndpoint = response.data.services
+          ?.find((s) => s.catalog_id === launchServiceId)
+          ?.endpoints?.find((e) => e.type === "ui")?.url;
+        endpointCacheRef.current[rowId] = uiEndpoint
+          ? { url: uiEndpoint }
+          : {
+              error: `No ${launchTargetLabel} UI endpoint is available for this deployment.`,
+            };
+      } catch {
+        endpointCacheRef.current[rowId] = {
+          error: `Could not retrieve the ${launchTargetLabel} endpoint. Please try again.`,
+        };
+      }
+    },
+    [launchServiceId, launchTargetLabel],
+  );
+
+  const handleLaunchEndpointForRow = useCallback(
+    (rowId: string) => {
+      const cached = endpointCacheRef.current[rowId];
+      if (cached && "url" in cached) {
+        window.open(cached.url, "_blank", "noopener,noreferrer");
+      } else if (cached && "error" in cached) {
+        dispatch({
+          type: ACTION_TYPES.SHOW_LAUNCH_ERROR_TOAST,
+          payload: cached.error,
+        } as AppAction);
+      } else {
+        // Prefetch not yet complete — should not be reachable since the item is
+        // disabled while isPrefetching, but guard defensively.
+        dispatch({
+          type: ACTION_TYPES.SHOW_LAUNCH_ERROR_TOAST,
+          payload: `Could not retrieve the ${launchTargetLabel} endpoint. Please try again.`,
+        } as AppAction);
+      }
+    },
+    [launchTargetLabel],
+  );
 
   // Show DeploymentDetails if a deployment is selected
   if (state.showDeploymentDetails && state.selectedDeployment) {
@@ -371,7 +388,8 @@ const DigitalAssistantsPage = () => {
           dispatch({ type: ACTION_TYPES.HIDE_DEPLOYMENT_DETAILS } as AppAction);
           loadApplications();
         }}
-        deploymentSource="Digital assistants"
+        deploymentSource={config.fallbackTitle}
+        architectureId={catalogId}
         defaultSection={state.deploymentDefaultSection}
         onNameUpdate={(newName) =>
           dispatch({
@@ -390,7 +408,7 @@ const DigitalAssistantsPage = () => {
         toastOpen={state.toastOpen}
         deleteErrorRowName={state.deleteErrorRowName}
         deleteErrorMessage={state.deleteErrorMessage}
-        entityLabel="digital assistant"
+        entityLabel={config.entityLabel}
         onDeleteErrorClose={() => dispatch({ type: "SHARED_HIDE_ERROR" })}
         onDeleteErrorRetry={async () => {
           const currentRowId = state.selectedRowId;
@@ -431,7 +449,7 @@ const DigitalAssistantsPage = () => {
           subtitle={pageSubtitle}
           fullWidthGrid="xl"
           navigation={
-            <TabList aria-label="Digital assistants tabs">
+            <TabList aria-label={`${config.fallbackTitle} tabs`}>
               <Tab>Deployments</Tab>
               <Tab>About</Tab>
             </TabList>
@@ -618,7 +636,7 @@ const DigitalAssistantsPage = () => {
                               fetchError={state.fetchError}
                               noData={noApplications}
                               noSearchResults={noSearchResults}
-                              entityName="digital assistant"
+                              entityName={config.entityLabel}
                               className={styles.noDataContent}
                             />
                           </TableContainer>
@@ -661,9 +679,9 @@ const DigitalAssistantsPage = () => {
                           r.id === state.selectedRowId,
                       )?.name ?? ""
                     }
-                    modalLabel="Delete digital assistant deployment"
-                    confirmLegend="Confirm digital assistant deployment to be deleted"
-                    warningText="Deleting a digital assistant deployment permanently deletes all associated components, including connected services, runtime metadata, and configurations will be permanently deleted, and it cannot be undone."
+                    modalLabel={`Delete ${config.entityLabel}`}
+                    confirmLegend={`Confirm ${config.entityLabel} to be deleted`}
+                    warningText={`Deleting a ${config.entityLabel} permanently deletes all associated components, including connected services, runtime metadata, and configurations will be permanently deleted, and it cannot be undone.`}
                     onConfirm={() => handleDelete()}
                     onClose={() =>
                       dispatch({ type: "SHARED_CLOSE_DELETE_DIALOG" })
@@ -701,6 +719,7 @@ const DigitalAssistantsPage = () => {
           </TabPanel>
           <TabPanel>
             <AboutTab
+              architectureId={catalogId}
               onDeployClick={() =>
                 dispatch({ type: ACTION_TYPES.OPEN_DEPLOY_FLOW } as AppAction)
               }
@@ -709,6 +728,8 @@ const DigitalAssistantsPage = () => {
         </TabPanels>
       </Tabs>
       <DeployFlow
+        architectureId={catalogId}
+        entityLabel={config.entityLabel}
         open={state.isDeployFlowOpen}
         onClose={() =>
           dispatch({ type: ACTION_TYPES.CLOSE_DEPLOY_FLOW } as AppAction)

@@ -65,9 +65,6 @@ spec:
         - |
           export POSTGRES_USER=$(cat /etc/secret/invoice-processing-db-secret/username)
           export POSTGRES_PASSWORD=$(cat /etc/secret/invoice-processing-db-secret/password)
-          {{- if .Values.llm.apiKey }}
-          export LLM_API_KEY=$(cat /etc/secret/vllm-secret/apiKey)
-          {{- end }}
           exec /var/venv/bin/python -m uvicorn app:app \
             --host 0.0.0.0 \
             --port 4100 \
@@ -100,14 +97,11 @@ spec:
           value: "5"
         - name: DB_MAX_OVERFLOW
           value: "5"
+        # Peer services of the invoice-processing architecture share this application's instance slug.
         - name: DIGITIZE_URL
-          value: "http://{{ .Values.digitize.host }}:{{ .Values.digitize.port }}"
+          value: "http://digitize-{{ .InstanceSlug }}:4000"
         - name: EXTRACT_URL
-          value: "http://{{ .Values.extract.host }}:{{ .Values.extract.port }}"
-        - name: LLM_ENDPOINT
-          value: "http://{{ .Values.llm.host }}:{{ .Values.llm.port }}"
-        - name: LLM_MODEL
-          value: "{{ .Values.llm.model }}"
+          value: "http://extract-api-{{ .InstanceSlug }}:9500"
         - name: LOG_LEVEL
           value: "{{ .Values.invoiceProcessing.log_level }}"
       volumeMounts:
@@ -116,11 +110,6 @@ spec:
         - mountPath: /etc/secret/invoice-processing-db-secret
           name: invoice-processing-db-secret
           readOnly: true
-        {{- if .Values.llm.apiKey }}
-        - mountPath: /etc/secret/vllm-secret
-          name: vllm-secret
-          readOnly: true
-        {{- end }}
   restartPolicy: Always
   volumes:
     - name: cache
@@ -129,8 +118,3 @@ spec:
     - name: invoice-processing-db-secret
       secret:
         secretName: "invoice-processing-db-secret-{{ .InstanceSlug }}"
-    {{- if .Values.llm.apiKey }}
-    - name: vllm-secret
-      secret:
-        secretName: "vllm-secret-{{ .Values.llm.instanceSlug }}"
-    {{- end }}

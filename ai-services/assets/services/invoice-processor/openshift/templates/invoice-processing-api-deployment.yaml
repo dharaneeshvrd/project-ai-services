@@ -97,21 +97,8 @@ spec:
               value: http://digitize-api:4000
             - name: EXTRACT_URL
               value: http://extract-api:9500
-            - name: LLM_ENDPOINT
-              value: http://llm-predictor:8000
-            - name: LLM_MODEL
-              value: {{ .Values.llm.model | quote }}
-            - name: LLM_MAX_MODEL_LEN
-              value: {{ .Values.llm.maxModelLen | quote }}
             - name: LOG_LEVEL
               value: "{{ .Values.invoiceProcessing.log_level }}"
-            {{- if .Values.llm.apiKey }}
-            - name: LLM_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: "vllm-instruct-api-key"
-                  key: apiKey
-            {{- end }}
           ports:
             - containerPort: 4100
               protocol: TCP

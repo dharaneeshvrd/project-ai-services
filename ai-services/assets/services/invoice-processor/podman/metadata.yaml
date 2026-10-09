@@ -1,8 +1,14 @@
-name: invoice-processing
+name: invoice-processor
 version: "1.0.0"
+podTemplateExecutions:
+  - [postgres-secret.yaml.tmpl]
+  - [postgres.yaml.tmpl]
+  - [invoice-processing.yaml.tmpl]
 
 # Resource requirements (UI + Backend + PostgreSQL)
 resources:
   cpu: 2
   memory: 4831838208 # 512Mi (UI) + 4Gi (Backend) = 4.5Gi in bytes
   storage: 10737418240 # 10Gi for PostgreSQL and cache storage in bytes
+
+# Made with Bob

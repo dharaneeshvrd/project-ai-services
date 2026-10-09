@@ -91,7 +91,7 @@ function buildInferenceOptions(
 // Worker props are only needed on step one (SharedStepOne), not here.
 type DAStepProps = Omit<
   StepProps,
-  "formData" | "workers" | "isLoadingWorkers" | "refetchWorkers"
+  "formData" | "workers" | "isLoadingWorkers" | "refetchWorkers" | "entityLabel"
 > & {
   formData: Omit<DeployFormData, "services"> & {
     services: Record<string, ServiceConfig>;

@@ -44,9 +44,12 @@ function extractModelsFromSchema(
 // Fetches deploy options and all component provider schemas eagerly on mount for both runtimes.
 // Failed schemas are skipped; reopening the tearsheet re-triggers them.
 // StepOne warns if any are still missing.
-export const useDeployOptions = (open: boolean, runtime: string) => {
+export const useDeployOptions = (
+  open: boolean,
+  runtime: string,
+  selectedArchitectureId: string,
+) => {
   const {
-    selectedArchitectureId,
     getDeployOptions,
     deployOptionsLoading,
     deployOptionsError,

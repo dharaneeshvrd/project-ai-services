@@ -49,6 +49,8 @@ interface DeploymentDetailsProps {
   deployment: DeploymentDetailsType;
   onBack: () => void;
   deploymentSource: string;
+  /** Set for architecture deployments; omitted for service deployments. */
+  architectureId?: string;
   onNameUpdate?: (newName: string) => void;
   /** Pre-select a side-nav section when the panel opens */
   defaultSection?: "details" | "services" | "integration" | "datasources";
@@ -58,6 +60,7 @@ const DeploymentDetails = ({
   deployment,
   onBack,
   deploymentSource,
+  architectureId,
   onNameUpdate,
   defaultSection = "details",
 }: DeploymentDetailsProps) => {
@@ -70,7 +73,7 @@ const DeploymentDetails = ({
     acceptsDatasource,
     error: datasourceSupportError,
     clearError: clearDatasourceSupportError,
-  } = useDeploymentDatasourceSupport(deploymentSource, deployedCatalogIds);
+  } = useDeploymentDatasourceSupport(architectureId, deployedCatalogIds);
   const [isLoadingResources, setIsLoadingResources] = useState(false);
   const [serviceData, setServiceData] = useState<DeploymentServiceData[]>([]);
   const [integrationEndpoints, setIntegrationEndpoints] = useState<
@@ -208,17 +211,15 @@ const DeploymentDetails = ({
           deploymentServices.map((s) => s.catalog_id).filter(Boolean),
         );
 
-        const isDeploymentCertified =
-          deployment.type === "Digital Assistant"
-            ? deploymentServices.length > 0 &&
-              deploymentServices.every(
-                (service) =>
-                  serviceMetadataById[service.catalog_id]?.certifiedBy ===
-                  "IBM",
-              )
-            : deploymentServices.length > 0 &&
-              serviceMetadataById[deploymentServices[0].catalog_id]
-                ?.certifiedBy === "IBM";
+        const isDeploymentCertified = architectureId
+          ? deploymentServices.length > 0 &&
+            deploymentServices.every(
+              (service) =>
+                serviceMetadataById[service.catalog_id]?.certifiedBy === "IBM",
+            )
+          : deploymentServices.length > 0 &&
+            serviceMetadataById[deploymentServices[0].catalog_id]
+              ?.certifiedBy === "IBM";
         const knownComponentTypes = new Set<string>(
           Object.values(COMPONENT_TYPES),
         );
@@ -322,7 +323,7 @@ const DeploymentDetails = ({
     };
 
     fetchServiceDetails();
-  }, [deployment.id, deployment.type]);
+  }, [deployment.id, architectureId]);
 
   const STATUS_CONFIG = {
     Initializing: {

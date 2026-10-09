@@ -22,6 +22,7 @@ export const StepOne: React.FC<StepProps> = ({
   onWorkerErrorReset,
   onComponentError,
   runtime = DEFAULT_RUNTIME,
+  entityLabel,
   workers,
   isLoadingWorkers,
   refetchWorkers,
@@ -192,7 +193,7 @@ export const StepOne: React.FC<StepProps> = ({
       formData={formData}
       onChange={onChange}
       version={deployOptions.version}
-      versionLabel="Digital assistant version"
+      versionLabel={`${entityLabel.charAt(0).toUpperCase()}${entityLabel.slice(1)} version`}
       components={components}
       onComponentChange={handleProviderChange}
       onModelChange={handleModelChange}

@@ -1,5 +1,5 @@
 apiVersion: v2
-name: invoice-processing
+name: invoice-processor
 description: A Helm chart for deploying the Invoice Processing service on OpenShift
 type: application
 
