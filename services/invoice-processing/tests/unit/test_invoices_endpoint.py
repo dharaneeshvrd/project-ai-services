@@ -5,9 +5,13 @@ import io
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+
+from fastapi.testclient import TestClient
+from models import UpdateInvoiceJobRequest
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,6 +35,61 @@ def _fake_job(job_id="job-abc", filename="inv.pdf", input_type="pdf", status="ac
     job.interface_ref = None
     job.job_metadata = None
     return job
+
+
+# ---------------------------------------------------------------------------
+# UpdateInvoiceJobRequest model tests
+# ---------------------------------------------------------------------------
+
+def test_update_request_all_fields():
+    """All three reviewer-editable fields are accepted."""
+    body = UpdateInvoiceJobRequest(
+        staged_header={"invoice_num": "INV-001"},
+        staged_lines=[{"amount": 100.0}],
+        interface_ref="AP-STANDARD",
+    )
+    assert body.staged_header == {"invoice_num": "INV-001"}
+    assert body.staged_lines == [{"amount": 100.0}]
+    assert body.interface_ref == "AP-STANDARD"
+
+
+def test_update_request_all_optional_defaults_none():
+    """Omitting all fields yields None defaults — no fields are required."""
+    body = UpdateInvoiceJobRequest()
+    assert body.staged_header is None
+    assert body.staged_lines is None
+    assert body.interface_ref is None
+
+
+def test_update_request_partial_update():
+    """Only the supplied field is set; the rest remain None."""
+    body = UpdateInvoiceJobRequest(interface_ref="AP-INTERCOMPANY")
+    assert body.interface_ref == "AP-INTERCOMPANY"
+    assert body.staged_header is None
+    assert body.staged_lines is None
+
+
+# ---------------------------------------------------------------------------
+# Schema registration failure
+# ---------------------------------------------------------------------------
+
+def test_submit_invoice_schema_registration_failure_returns_503(client, tmp_path):
+    """When the extract service is unreachable, schema registration raises HTTP 503."""
+    from fastapi import HTTPException
+    from settings import InvoiceProcessingConfig
+
+    async def _raise_503():
+        raise HTTPException(status_code=503, detail="Extract service unavailable")
+
+    with patch("api.v1.invoices.ensure_invoice_schema_registered", side_effect=_raise_503), \
+         patch.object(InvoiceProcessingConfig, "staging_dir", new_callable=PropertyMock, return_value=tmp_path / "staging"):
+
+        resp = client.post(
+            "/v1/invoices",
+            files={"file": ("invoice.pdf", io.BytesIO(b"%PDF"), "application/pdf")},
+        )
+
+    assert resp.status_code == 503
 
 
 # ---------------------------------------------------------------------------
