@@ -32,7 +32,7 @@ export const INVOICE_PROCESSING_CONFIG: ArchitecturePageConfig = {
   entityLabel: "deployment",
   fallbackTitle: "Invoice processing",
   fallbackSubtitle:
-    "Automates end-to-end invoice handling by digitizing PDF and image invoices, extracting structured data with an LLM, and loading the results into a target ERP or database system.",
+    "Automates end-to-end invoice handling by digitizing PDF and image invoices, extracting structured data with an LLM, and loading the results into a target system.",
   launchServiceId: "invoice-processor",
   launchTargetLabel: "invoice processing",
 };

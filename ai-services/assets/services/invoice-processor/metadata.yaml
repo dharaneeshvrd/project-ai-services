@@ -2,7 +2,7 @@
 id: invoice-processor
 version: "1.0.0"
 name: "Invoice processing"
-description: "Automates end-to-end invoice handling by extracting structured data from PDF and image invoices and loading results into a target ERP or database system."
+description: "Automates end-to-end invoice handling by extracting structured data from PDF and image invoices and loading results into a target system."
 type: service
 
 # Certification and support
