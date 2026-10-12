@@ -52,3 +52,23 @@ class InvoiceJobDetailResponse(BaseModel):
     job_metadata: Optional[dict[str, Any]] = None
 
     model_config = {"from_attributes": True}
+
+
+class UpdateInvoiceJobRequest(BaseModel):
+    """Partial update for a job in REVIEW status.
+    Only the three fields a human reviewer may correct are accepted.
+    All fields are optional — omit any field to leave it unchanged.
+    """
+
+    staged_header: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Corrected AP_INVOICES_ALL header fields",
+    )
+    staged_lines: Optional[list[dict[str, Any]]] = Field(
+        default=None,
+        description="Corrected AP_INVOICE_LINES_ALL line items",
+    )
+    interface_ref: Optional[str] = Field(
+        default=None,
+        description="Override the routing/interface reference assigned to this invoice",
+    )

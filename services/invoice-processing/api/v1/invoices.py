@@ -20,6 +20,7 @@ from models import (
     InvoiceJobDetailResponse,
     PaginatedResponse,
     PaginationInfo,
+    UpdateInvoiceJobRequest,
 )
 from pipeline.oneshot_path import run_oneshot_path
 from pipeline.pdf_path import run_pdf_path
@@ -179,6 +180,52 @@ async def list_invoice_jobs(
             total_items=total,
             total_pages=total_pages,
         ),
+    )
+
+# ---------------------------------------------------------------------------
+# PATCH /v1/invoices/{job_id}   (stub — PR-7)
+# ---------------------------------------------------------------------------
+
+@router.patch(
+    "/{job_id}",
+    response_model=InvoiceJobDetailResponse,
+    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    summary="Update staged invoice fields for human review (Stub)",
+)
+async def update_invoice_job(job_id: str, body: UpdateInvoiceJobRequest):
+    """Correct extracted invoice data while the job is in REVIEW status.
+
+    Only ``staged_header``, ``staged_lines``, and ``interface_ref`` are
+    accepted — these are the fields a human reviewer may need to fix before
+    approving.  The job must be in ``review`` status; any other status
+    returns HTTP 409.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Invoice job update is not implemented in boilerplate scaffold.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# DELETE /v1/invoices/{job_id}   (stub — PR-7)
+# ---------------------------------------------------------------------------
+
+@router.delete(
+    "/{job_id}",
+    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    summary="Delete an invoice processing job (Stub)",
+)
+async def delete_invoice_job(job_id: str):
+    """Delete an invoice job record and any associated staged data.
+
+    Terminal-status jobs (``completed``, ``rejected``, ``failed``) and jobs
+    still in ``review`` may be deleted.  Jobs actively in-flight
+    (``routing``, ``digitizing``, ``extracting``, ``staging``, ``loading``)
+    return HTTP 409 — cancel is not supported.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Invoice job deletion is not implemented in boilerplate scaffold.",
     )
 
 

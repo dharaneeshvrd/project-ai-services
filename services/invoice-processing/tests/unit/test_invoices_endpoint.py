@@ -312,3 +312,11 @@ def test_reject_stub_returns_501(client):
     assert resp.status_code == 501
 
 
+def test_update_stub_returns_501(client):
+    resp = client.patch("/v1/invoices/some-job", json={})
+    assert resp.status_code == 501
+
+
+def test_delete_stub_returns_501(client):
+    resp = client.delete("/v1/invoices/some-job")
+    assert resp.status_code == 501
