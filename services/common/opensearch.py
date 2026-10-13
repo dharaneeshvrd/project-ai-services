@@ -1,7 +1,9 @@
 import numpy as np
 import hashlib
+import threading
 from tqdm import tqdm
 from opensearchpy import OpenSearch, helpers
+from opensearchpy.exceptions import NotFoundError
 
 from common.misc_utils import get_logger
 from common.vector_db import VectorStore, VectorStoreNotReadyError
@@ -9,6 +11,27 @@ from common.retry_utils import retry_on_transient_error
 from common.settings import settings
 
 logger = get_logger("OpenSearch")
+
+# Index layout version, stored in the index mapping under "_meta.schema_version".
+#   1 - legacy: metadata fields nested under a "metadata" object (no _meta marker)
+#   2 - current: metadata fields flattened to the top level
+SCHEMA_VERSION = 2
+
+# Suffix of the temporary index used while migrating a legacy index in place.
+MIGRATION_INDEX_SUFFIX = "__migrating"
+
+# Timeout (seconds) for a single _reindex call during migration.
+MIGRATION_REQUEST_TIMEOUT = 3600
+
+# Painless script that moves every key of the legacy "metadata" object to the top level.
+_FLATTEN_METADATA_SCRIPT = (
+    "def m = ctx._source.remove('metadata');"
+    "if (m instanceof Map) { for (def e : m.entrySet()) { ctx._source[e.getKey()] = e.getValue(); } }"
+)
+
+# Serialises migration and write-path schema checks across threads in one process.
+# Digitize (the only writer) runs as a single replica, so this is sufficient.
+_migration_lock = threading.Lock()
 
 
 def generate_chunk_id(doc_id: str, page_content: str) -> np.int64:
@@ -92,21 +115,14 @@ class OpensearchVectorStore(VectorStore):
             logger.error(f"Failed to create hybrid search pipeline: {e}")
             raise
 
-    @retry_on_transient_error(max_retries=3, initial_delay=5.0, backoff_multiplier=2.0)
-    def _setup_index(self, dim):
-        logger.debug(f"Setting up index {self.index_name} with dimension {dim}")
+    def _index_body(self, dim):
+        """Return the settings and mappings for a current-schema index.
 
-        if self.client.indices.exists(index=self.index_name):
-            return
-
-        logger.debug(f"Creating new index {self.index_name}")
-
-        # index body: settings and mappings.
-        # All fields are stored as top-level doc_values columns (no nested
-        # metadata object). _source is disabled so OpenSearch never stores the
-        # raw JSON blob — retrieval goes through docvalue_fields instead, which
-        # is ~5x faster per the OpenSearch blog.
-        index_body = {
+        All metadata fields are stored at the top level so they can be read back
+        via docvalue_fields at query time. _source is intentionally kept enabled:
+        backup/restore and _reindex (used for schema migration) depend on it.
+        """
+        return {
             "settings": {
                 "index": {
                     "knn": True,  # Enable k-NN search functionality
@@ -116,10 +132,9 @@ class OpensearchVectorStore(VectorStore):
                 }
             },
             "mappings": {
-                # Disable _source storage — all field values are read back via
-                # doc_values (docvalue_fields in queries), avoiding the cost of
-                # decompressing and parsing the stored JSON blob per hit.
-                "_source": {"enabled": False},
+                # Layout version marker, used to detect legacy indexes (e.g. restored
+                # from an older backup) that need migration.
+                "_meta": {"schema_version": SCHEMA_VERSION},
                 "properties": {
                     # Unique identifier for each chunk, generated from doc_id and content hash
                     # doc_values=True is the default for long — kept explicit for clarity
@@ -166,13 +181,129 @@ class OpensearchVectorStore(VectorStore):
                 }
             }
         }
-        # Create the Index
+
+    def _get_schema_version(self, index):
+        """Return the layout version of ``index``, or None if it does not exist.
+
+        Indexes without a ``_meta.schema_version`` marker that still contain the
+        nested ``metadata`` object are legacy (version 1).
+        """
         try:
-            self.client.indices.create(index=self.index_name, body=index_body)
-            logger.debug(f"Index {self.index_name} created successfully with {dim} dimensions")
+            response = self.client.indices.get_mapping(index=index)
+        except NotFoundError:
+            return None
+
+        mappings = next(iter(response.values()), {}).get("mappings", {})
+        version = mappings.get("_meta", {}).get("schema_version")
+        if version is not None:
+            return int(version)
+        return 1 if "metadata" in mappings.get("properties", {}) else SCHEMA_VERSION
+
+    def _get_embedding_dimension(self, index):
+        response = self.client.indices.get_mapping(index=index)
+        mappings = next(iter(response.values()))["mappings"]
+        return mappings["properties"]["embedding"]["dimension"]
+
+    def _create_index(self, index, dim):
+        try:
+            self.client.indices.create(index=index, body=self._index_body(dim))
+            logger.debug(f"Index {index} created successfully with {dim} dimensions")
         except Exception as e:
-            logger.error(f"Failed to create index {self.index_name}: {e}")
+            logger.error(f"Failed to create index {index}: {e}")
             raise
+
+    def _copy_index(self, source, dest, script=None):
+        """Copy all documents from ``source`` to ``dest`` and verify the document count."""
+        self.client.indices.refresh(index=source)
+
+        body = {"source": {"index": source}, "dest": {"index": dest}}
+        if script:
+            body["script"] = {"lang": "painless", "source": script}
+
+        response = self.client.reindex(
+            body=body,
+            wait_for_completion=True,
+            refresh=True,
+            request_timeout=MIGRATION_REQUEST_TIMEOUT,
+        )
+        failures = response.get("failures") or []
+        if failures:
+            raise RuntimeError(f"Reindex {source} -> {dest} reported {len(failures)} failures")
+
+        source_count = self.client.count(index=source)["count"]
+        dest_count = self.client.count(index=dest)["count"]
+        if dest_count != source_count:
+            raise RuntimeError(
+                f"Reindex {source} -> {dest} count mismatch: source={source_count}, dest={dest_count}"
+            )
+        logger.info(f"Copied {dest_count} documents from {source} to {dest}")
+
+    def migrate_legacy_index(self):
+        """Migrate a legacy (schema v1) index in place to the current layout.
+
+        The index name is kept unchanged so existing backup/restore tooling keeps
+        working. Steps:
+          1. create <index>__migrating with the current mapping
+          2. reindex <index> -> <index>__migrating, flattening "metadata"
+          3. delete <index> and recreate it with the current mapping
+          4. reindex <index>__migrating -> <index>
+          5. delete <index>__migrating
+
+        Data always exists in at least one of the two indexes, so an interrupted
+        migration is resumed on the next call.
+
+        Returns:
+            str: "absent", "current", or "migrated"
+        """
+        main = self.index_name
+        temp = f"{main}{MIGRATION_INDEX_SUFFIX}"
+
+        with _migration_lock:
+            main_version = self._get_schema_version(main)
+            temp_version = self._get_schema_version(temp)
+
+            if temp_version is None:
+                if main_version is None:
+                    return "absent"
+                if main_version >= SCHEMA_VERSION:
+                    return "current"
+
+            logger.info(
+                f"Migrating index {main} to schema v{SCHEMA_VERSION} "
+                f"(index version: {main_version}, temp index present: {temp_version is not None})"
+            )
+
+            if main_version is not None and main_version < SCHEMA_VERSION:
+                # Fresh start, or an attempt interrupted before the legacy index was
+                # deleted. The legacy index is intact, so (re)build the temp copy.
+                if temp_version is not None:
+                    self.client.indices.delete(index=temp)
+                self._create_index(temp, self._get_embedding_dimension(main))
+                self._copy_index(main, temp, script=_FLATTEN_METADATA_SCRIPT)
+                self.client.indices.delete(index=main)
+                main_version = None
+
+            if main_version is None:
+                self._create_index(main, self._get_embedding_dimension(temp))
+
+            # Copying again is safe if a previous attempt was interrupted
+            # mid-copy: documents keep their _id and are overwritten.
+            self._copy_index(temp, main)
+            self.client.indices.delete(index=temp)
+
+            logger.info(f"Index {main} migrated to schema v{SCHEMA_VERSION}")
+            return "migrated"
+
+    @retry_on_transient_error(max_retries=3, initial_delay=5.0, backoff_multiplier=2.0)
+    def _setup_index(self, dim):
+        logger.debug(f"Setting up index {self.index_name} with dimension {dim}")
+
+        # Upgrade a legacy index (e.g. restored from an old backup) before writing to it.
+        if self.migrate_legacy_index() != "absent":
+            return
+
+        logger.debug(f"Creating new index {self.index_name}")
+        self._create_index(self.index_name, dim)
 
     @retry_on_transient_error(max_retries=3, initial_delay=5.0, backoff_multiplier=2.0)
     def insert_chunks(self, chunks, vectors=None, embedding=None, batch_size=10, cancel_event=None):
@@ -274,8 +405,8 @@ class OpensearchVectorStore(VectorStore):
                     metadata["created_at"] = doc.get("created_at")
 
                 # Index all fields at the top level so OpenSearch stores them
-                # as doc_values columns. No nested _source/metadata wrapper —
-                # _source is disabled on the index; retrieval uses docvalue_fields.
+                # as doc_values columns (no nested metadata object);
+                # search retrieves them via docvalue_fields.
                 actions.append({
                     "_index": self.index_name,
                     "_id": str(cid),
@@ -331,9 +462,21 @@ class OpensearchVectorStore(VectorStore):
         logger.debug(f"Starting search operation: query='{query_text[:50]}...', top_k={top_k}, mode={mode}, language={language}")
 
         query = query_text
-        if not self.client.indices.exists(index=self.index_name):
+        schema_version = self._get_schema_version(self.index_name)
+        if schema_version is None:
             logger.error(f"Index {self.index_name} does not exist")
             raise OpensearchNotReadyError("Index is empty. Ingest documents first.")
+        if schema_version < SCHEMA_VERSION:
+            # Legacy layout (e.g. restored from an older backup). Querying it with the
+            # current field names would silently return no results, so fail clearly.
+            # The digitize service migrates the index on startup or its next write.
+            logger.error(
+                f"Index {self.index_name} uses legacy schema v{schema_version}; "
+                f"migration to v{SCHEMA_VERSION} pending"
+            )
+            raise OpensearchNotReadyError(
+                "Index migration pending. Restart the digitize service to upgrade the index."
+            )
 
         if vector is not None:
             logger.debug("Using pre-computed query vector")
@@ -354,9 +497,9 @@ class OpensearchVectorStore(VectorStore):
         logger.debug(f"Search mode: {mode}, limit: {limit}")
         params = {}
 
-        # _source is disabled on the index; retrieve field values via
-        # docvalue_fields (columnar, ~5x faster) + stored_fields for "text"
-        # (text fields don't support doc_values, but store=True is set).
+        # Skip _source at query time (kept on the index for backup/reindex);
+        # retrieve field values via docvalue_fields (columnar) + stored_fields
+        # for "text" (text fields don't support doc_values, but store=True is set).
         _retrieve = {
             "_source": False,
             "docvalue_fields": ["chunk_id", "filename", "doc_id", "type", "source",
@@ -436,7 +579,7 @@ class OpensearchVectorStore(VectorStore):
             raise
 
         # Format results — read from docvalue_fields / stored_fields since
-        # _source is disabled. docvalue_fields returns each value as a list;
+        # _source is not fetched. docvalue_fields returns each value as a list;
         # unwrap the first element. stored_fields["text"] is also a list.
         results = []
         for idx, hit in enumerate(response["hits"]["hits"]):
@@ -512,7 +655,8 @@ class OpensearchVectorStore(VectorStore):
 
         logger.debug(f"Starting targeted cleanup of {len(doc_ids)} documents in {self.index_name}")
 
-        if not self.client.indices.exists(index=self.index_name):
+        # Upgrade a legacy index first so the top-level doc_id query matches.
+        if self.migrate_legacy_index() == "absent":
             logger.info(f"Index {self.index_name} does not exist.")
             return 0
 
@@ -554,7 +698,8 @@ class OpensearchVectorStore(VectorStore):
         """
         logger.debug(f"Starting delete operation for document {doc_id}")
 
-        if not self.client.indices.exists(index=self.index_name):
+        # Upgrade a legacy index first so the top-level doc_id query matches.
+        if self.migrate_legacy_index() == "absent":
             logger.error(f"Index {self.index_name} does not exist, nothing to delete")
             return 0
 
