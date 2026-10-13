@@ -7,6 +7,7 @@ import {
 import { DEFAULT_RUNTIME } from "@/constants";
 import { useDeployStore } from "@/store/deploy.store";
 import { useServiceDeployStore } from "@/store/serviceDeploy.store";
+import { INVOICE_PROCESSING_CONFIG } from "@/pages/DigitalAssistants/architectureConfigs";
 
 /**
  * Returns whether the "Data sources" tab should be shown for a deployment.
@@ -52,6 +53,12 @@ export function useDeploymentDatasourceSupport(
 
     if (isDA) {
       if (!selectedArchitectureId) {
+        set(false);
+        return;
+      }
+
+      // Data sources are not applicable to invoice processing.
+      if (selectedArchitectureId === INVOICE_PROCESSING_CONFIG.architectureId) {
         set(false);
         return;
       }
