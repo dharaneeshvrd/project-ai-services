@@ -35,6 +35,7 @@ import {
 } from "../Shared/utils/formData";
 import { dedupe } from "@/utils/requestManager";
 import { useWorkers } from "@/hooks/useWorkers";
+import { INVOICE_PROCESSING_CONFIG } from "@/pages/DigitalAssistants/architectureConfigs";
 
 const BASE_STEPS = [
   {
@@ -151,9 +152,11 @@ export const DeployFlow = ({
 
   const hasDatasourceStep = useMemo(
     () =>
-      deployOptions?.services.some((s) => s.accepts_datasource === true) ??
-      false,
-    [deployOptions],
+      // Data sources / connectors are not applicable to invoice processing.
+      architectureId !== INVOICE_PROCESSING_CONFIG.architectureId &&
+      (deployOptions?.services.some((s) => s.accepts_datasource === true) ??
+        false),
+    [deployOptions, architectureId],
   );
 
   const steps = useMemo(
