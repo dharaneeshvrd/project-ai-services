@@ -21,7 +21,8 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def mock_db_connection():
     with patch("app.check_db_connection", return_value=True), \
-         patch("app._initialize_database"):
+         patch("app._initialize_database"), \
+         patch("api.v1.invoices.ensure_invoice_schema_registered"):
         yield
 
 

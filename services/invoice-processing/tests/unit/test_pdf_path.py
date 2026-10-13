@@ -4,81 +4,197 @@ Unit tests for pipeline/pdf_path.py — run_pdf_path().
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from pipeline.pdf_path import run_pdf_path
 
 
-def test_pdf_path_calls_digitize_submit(tmp_path):
-    """run_pdf_path must call digitize_client.submit_document with job_id and file_path."""
-    staged = tmp_path / "invoice.pdf"
-    staged.write_bytes(b"%PDF-1.4")
+@pytest.fixture
+def staged_pdf(tmp_path):
+    p = tmp_path / "invoice.pdf"
+    p.write_bytes(b"%PDF-1.4 test invoice content")
+    return p
 
-    mock_client = MagicMock()
-    mock_client.submit_document = AsyncMock(return_value={"digitize_job_id": "dg-1"})
 
-    result = asyncio.run(
-        run_pdf_path(job_id="job-pdf-1", staged_path=staged, digitize_client=mock_client)
+@pytest.mark.asyncio
+async def test_pdf_path_happy_path(staged_pdf):
+    """Full PDF path orchestration updates DB states and calls downstream clients in order."""
+    mock_digitize = MagicMock()
+    mock_digitize.submit_document = AsyncMock(return_value="dg-123")
+    mock_digitize.poll_job = AsyncMock(return_value="# Invoice Content\nAmount: $100")
+
+    mock_extract = MagicMock()
+    mock_extract.submit_extraction = AsyncMock(return_value="ext-456")
+    mock_extract.poll_job = AsyncMock(
+        return_value={"AP_INVOICES_ALL": {"INVOICE_NUM": "INV-001"}, "AP_INVOICE_LINES_ALL": []}
     )
 
-    mock_client.submit_document.assert_called_once_with(
+    with patch("pipeline.pdf_path.db_manager") as mock_db:
+        result = await run_pdf_path(
+            job_id="job-pdf-1",
+            staged_path=staged_pdf,
+            digitize_client=mock_digitize,
+            extract_client=mock_extract,
+        )
+
+    # Check digitize calls
+    mock_digitize.submit_document.assert_awaited_once_with(job_id="job-pdf-1", file_path=staged_pdf)
+    mock_digitize.poll_job.assert_awaited_once_with("dg-123")
+
+    # Check extract calls
+    mock_extract.submit_extraction.assert_awaited_once_with(
         job_id="job-pdf-1",
-        file_path=staged,
+        content="# Invoice Content\nAmount: $100",
+        schema_name="invoice-extraction-v1",
     )
-    assert result == {"digitize_job_id": "dg-1"}
+    mock_extract.poll_job.assert_awaited_once_with("ext-456")
+
+    # Check DB updates
+    assert mock_db.update_job.call_count == 4
+    mock_db.update_job.assert_any_call(job_id="job-pdf-1", status="digitizing")
+    mock_db.update_job.assert_any_call(job_id="job-pdf-1", status="digitizing", digitize_job_id="dg-123")
+    mock_db.update_job.assert_any_call(job_id="job-pdf-1", status="extracting")
+    mock_db.update_job.assert_any_call(job_id="job-pdf-1", status="extracting", extract_job_id="ext-456")
+
+    assert result == {"AP_INVOICES_ALL": {"INVOICE_NUM": "INV-001"}, "AP_INVOICE_LINES_ALL": []}
 
 
-def test_pdf_path_does_not_inspect_content(tmp_path):
-    """PDF path must not attempt any type detection — content is forwarded as-is."""
-    # Use deliberately minimal/empty bytes to prove no parsing occurs
+@pytest.mark.asyncio
+async def test_pdf_path_digitize_timeout(staged_pdf):
+    """Digitize polling timeout raises TimeoutError and stops pipeline."""
+    mock_digitize = MagicMock()
+    mock_digitize.submit_document = AsyncMock(return_value="dg-123")
+    mock_digitize.poll_job = AsyncMock(side_effect=TimeoutError("Digitize timed out"))
+
+    mock_extract = MagicMock()
+    mock_extract.submit_extraction = AsyncMock()
+
+    with patch("pipeline.pdf_path.db_manager"):
+        with pytest.raises(TimeoutError, match="Digitize timed out"):
+            await run_pdf_path(
+                job_id="job-pdf-to",
+                staged_path=staged_pdf,
+                digitize_client=mock_digitize,
+                extract_client=mock_extract,
+            )
+
+    mock_extract.submit_extraction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pdf_path_digitize_failure(staged_pdf):
+    """Digitize job failure raises RuntimeError and stops pipeline."""
+    mock_digitize = MagicMock()
+    mock_digitize.submit_document = AsyncMock(return_value="dg-123")
+    mock_digitize.poll_job = AsyncMock(side_effect=RuntimeError("Digitize job failed: OCR corrupted"))
+
+    mock_extract = MagicMock()
+    mock_extract.submit_extraction = AsyncMock()
+
+    with patch("pipeline.pdf_path.db_manager"):
+        with pytest.raises(RuntimeError, match="Digitize job failed"):
+            await run_pdf_path(
+                job_id="job-pdf-fail",
+                staged_path=staged_pdf,
+                digitize_client=mock_digitize,
+                extract_client=mock_extract,
+            )
+
+    mock_extract.submit_extraction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pdf_path_extract_timeout(staged_pdf):
+    """Extract polling timeout raises TimeoutError."""
+    mock_digitize = MagicMock()
+    mock_digitize.submit_document = AsyncMock(return_value="dg-123")
+    mock_digitize.poll_job = AsyncMock(return_value="# Markdown")
+
+    mock_extract = MagicMock()
+    mock_extract.submit_extraction = AsyncMock(return_value="ext-456")
+    mock_extract.poll_job = AsyncMock(side_effect=TimeoutError("Extract timed out"))
+
+    with patch("pipeline.pdf_path.db_manager"):
+        with pytest.raises(TimeoutError, match="Extract timed out"):
+            await run_pdf_path(
+                job_id="job-ext-to",
+                staged_path=staged_pdf,
+                digitize_client=mock_digitize,
+                extract_client=mock_extract,
+            )
+
+
+@pytest.mark.asyncio
+async def test_pdf_path_extract_failure(staged_pdf):
+    """Extract job failure raises RuntimeError."""
+    mock_digitize = MagicMock()
+    mock_digitize.submit_document = AsyncMock(return_value="dg-123")
+    mock_digitize.poll_job = AsyncMock(return_value="# Markdown")
+
+    mock_extract = MagicMock()
+    mock_extract.submit_extraction = AsyncMock(return_value="ext-456")
+    mock_extract.poll_job = AsyncMock(side_effect=RuntimeError("Extract job failed"))
+
+    with patch("pipeline.pdf_path.db_manager"):
+        with pytest.raises(RuntimeError, match="Extract job failed"):
+            await run_pdf_path(
+                job_id="job-ext-fail",
+                staged_path=staged_pdf,
+                digitize_client=mock_digitize,
+                extract_client=mock_extract,
+            )
+
+
+@pytest.mark.asyncio
+async def test_pdf_path_does_not_inspect_content(tmp_path):
+    """PDF path must not perform type detection on content — forwards as-is."""
     staged = tmp_path / "unknown.pdf"
-    staged.write_bytes(b"not a real pdf")
+    staged.write_bytes(b"not a valid pdf header")
 
-    mock_client = MagicMock()
-    mock_client.submit_document = AsyncMock(return_value={})
+    mock_digitize = MagicMock()
+    mock_digitize.submit_document = AsyncMock(return_value="dg-999")
+    mock_digitize.poll_job = AsyncMock(return_value="text")
 
-    # Should complete without raising even with invalid PDF bytes
-    asyncio.run(
-        run_pdf_path(job_id="job-asis-1", staged_path=staged, digitize_client=mock_client)
-    )
+    mock_extract = MagicMock()
+    mock_extract.submit_extraction = AsyncMock(return_value="ext-999")
+    mock_extract.poll_job = AsyncMock(return_value={})
 
-    mock_client.submit_document.assert_called_once_with(
+    with patch("pipeline.pdf_path.db_manager"):
+        result = await run_pdf_path(
+            job_id="job-asis-1",
+            staged_path=staged,
+            digitize_client=mock_digitize,
+            extract_client=mock_extract,
+        )
+
+    mock_digitize.submit_document.assert_awaited_once_with(
         job_id="job-asis-1",
         file_path=staged,
     )
+    assert result == {}
 
 
-def test_pdf_path_logs_at_info(tmp_path, caplog):
-    """run_pdf_path must log the forwarding decision at INFO level."""
-    import logging
+@pytest.mark.asyncio
+async def test_pdf_path_default_clients(staged_pdf):
+    """Default DigitizeClient and ExtractClient instances are created when None passed."""
+    with patch("pipeline.pdf_path.DigitizeClient") as mock_dig_cls, \
+         patch("pipeline.pdf_path.ExtractClient") as mock_ext_cls, \
+         patch("pipeline.pdf_path.db_manager"):
 
-    staged = tmp_path / "bill.pdf"
-    staged.write_bytes(b"%PDF-1.7")
+        mock_dig_inst = MagicMock()
+        mock_dig_inst.submit_document = AsyncMock(return_value="dg-def")
+        mock_dig_inst.poll_job = AsyncMock(return_value="md")
+        mock_dig_cls.return_value = mock_dig_inst
 
-    mock_client = MagicMock()
-    mock_client.submit_document = AsyncMock(return_value={})
+        mock_ext_inst = MagicMock()
+        mock_ext_inst.submit_extraction = AsyncMock(return_value="ext-def")
+        mock_ext_inst.poll_job = AsyncMock(return_value={"status": "ok"})
+        mock_ext_cls.return_value = mock_ext_inst
 
-    with caplog.at_level(logging.INFO, logger="pipeline.pdf_path"):
-        asyncio.run(
-            run_pdf_path(job_id="job-log-1", staged_path=staged, digitize_client=mock_client)
-        )
+        result = await run_pdf_path(job_id="job-def-1", staged_path=staged_pdf)
 
-    assert "PDF path" in caplog.text
-    assert "digitize" in caplog.text
-
-
-def test_pdf_path_returns_digitize_result(tmp_path):
-    """Return value must be exactly what digitize_client.submit_document returns."""
-    staged = tmp_path / "invoice.pdf"
-    staged.write_bytes(b"%PDF-1.5")
-
-    expected = {"digitize_job_id": "dg-42", "status": "queued"}
-    mock_client = MagicMock()
-    mock_client.submit_document = AsyncMock(return_value=expected)
-
-    result = asyncio.run(
-        run_pdf_path(job_id="job-ret-1", staged_path=staged, digitize_client=mock_client)
-    )
-    assert result == expected
+        mock_dig_cls.assert_called_once()
+        mock_ext_cls.assert_called_once()
+        assert result == {"status": "ok"}

@@ -41,9 +41,9 @@ class InvoiceProcessingConfig(BaseSettings):
 
     # Async job polling
     job_timeout_seconds: int = Field(
-        default=300,
+        default=1800,
         ge=1,
-        description="Timeout in seconds when waiting for downstream async jobs",
+        description="Timeout in seconds when waiting for downstream async jobs (default: 30 minutes)",
     )
     job_poll_interval_seconds: float = Field(
         default=3.0,
