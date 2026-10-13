@@ -58,7 +58,7 @@ async def test_register_schema_already_exists(client):
 
 
 @pytest.mark.asyncio
-async def test_submit_text(client):
+async def test_submit_file_with_markdown_string(client):
     mock_resp = MagicMock()
     mock_resp.status_code = 202
     mock_resp.json.return_value = {"job_id": "ext-job-001"}
@@ -69,17 +69,20 @@ async def test_submit_text(client):
     mock_client.__aexit__.return_value = None
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        job_id = await client.submit_text("# Invoice Markdown", schema_name="invoice-extraction-v1")
+        job_id = await client.submit_file("# Invoice Markdown", schema_name="invoice-extraction-v1")
 
     assert job_id == "ext-job-001"
     mock_client.post.assert_awaited_once()
     call_args, call_kwargs = mock_client.post.call_args
     assert call_args[0] == "http://extract-service:6000/v1/extract/jobs"
     assert call_kwargs["data"] == {"schema_name": "invoice-extraction-v1"}
+    filename, content_bytes, mime = call_kwargs["files"]["files"]
+    assert filename == "invoice.md"
+    assert mime == "text/markdown"
 
 
 @pytest.mark.asyncio
-async def test_submit_image(client, staged_img):
+async def test_submit_file_with_path(client, staged_img):
     mock_resp = MagicMock()
     mock_resp.status_code = 202
     mock_resp.json.return_value = {"job_id": "ext-job-img-001"}
@@ -90,9 +93,57 @@ async def test_submit_image(client, staged_img):
     mock_client.__aexit__.return_value = None
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        job_id = await client.submit_image(staged_img, schema_name="invoice-extraction-v1")
+        job_id = await client.submit_file(staged_img, schema_name="invoice-extraction-v1")
 
     assert job_id == "ext-job-img-001"
+    mock_client.post.assert_awaited_once()
+    call_args, call_kwargs = mock_client.post.call_args
+    assert call_args[0] == "http://extract-service:6000/v1/extract/jobs"
+    filename, _bytes, mime = call_kwargs["files"]["files"]
+    assert filename == staged_img.name
+    assert mime == "image/png"
+
+
+def _status_error_resp(status_code: int) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        f"{status_code} Error", request=MagicMock(), response=resp
+    )
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_submit_file_retries_on_transient_error(client):
+    ok_resp = MagicMock()
+    ok_resp.status_code = 202
+    ok_resp.json.return_value = {"job_id": "ext-job-retry"}
+
+    mock_client = AsyncMock()
+    mock_client.post.side_effect = [_status_error_resp(429), _status_error_resp(503), ok_resp]
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+
+    with patch("httpx.AsyncClient", return_value=mock_client), \
+         patch("common.retry_utils.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+        job_id = await client.submit_file("# Invoice Markdown")
+
+    assert job_id == "ext-job-retry"
+    assert mock_client.post.await_count == 3
+    assert mock_sleep.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_submit_file_does_not_retry_client_error(client):
+    mock_client = AsyncMock()
+    mock_client.post.return_value = _status_error_resp(400)
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.submit_file("# Invoice Markdown")
+
     mock_client.post.assert_awaited_once()
 
 
@@ -108,11 +159,11 @@ async def test_submit_extraction_routing(client, staged_img):
     mock_client.__aexit__.return_value = None
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        # text content
+        # text content routed through submit_file
         res1 = await client.submit_extraction(content="# Markdown text")
         assert res1 == "ext-routed-001"
 
-        # image file_path
+        # file path routed through submit_file
         res2 = await client.submit_extraction(file_path=staged_img)
         assert res2 == "ext-routed-001"
 

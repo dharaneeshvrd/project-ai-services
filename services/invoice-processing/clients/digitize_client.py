@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from common.misc_utils import get_logger
+from common.retry_utils import async_retry_on_transient_error
 from settings import settings
 
 logger = get_logger("clients.digitize_client")
@@ -44,17 +45,21 @@ class DigitizeClient:
         params = {"operation": "digitization", "output_format": "md"}
         data = {"operation": "digitization", "output_format": "md"}
 
-        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
-            with open(fp, "rb") as fh:
-                files = {"files": (fp.name, fh.read(), "application/pdf")}
-                resp = await client.post(
-                    url,
-                    params=params,
-                    data=data,
-                    files=files,
-                )
-            resp.raise_for_status()
-            return resp.json()["job_id"]
+        @async_retry_on_transient_error()
+        async def _post() -> str:
+            async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
+                with open(fp, "rb") as fh:
+                    files = {"files": (fp.name, fh.read(), "application/pdf")}
+                    resp = await client.post(
+                        url,
+                        params=params,
+                        data=data,
+                        files=files,
+                    )
+                resp.raise_for_status()
+                return resp.json()["job_id"]
+
+        return await _post()
 
     submit_pdf = submit_document
 
@@ -115,5 +120,3 @@ class DigitizeClient:
         raise TimeoutError(
             f"Digitize job {job_id} did not complete within {timeout_val}s"
         )
-
-    poll_digitize_job = poll_job

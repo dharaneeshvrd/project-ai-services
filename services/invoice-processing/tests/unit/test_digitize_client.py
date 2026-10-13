@@ -44,13 +44,18 @@ async def test_submit_document_success(client, staged_pdf):
     assert call_kwargs["params"] == {"operation": "digitization", "output_format": "md"}
 
 
+def _status_error_resp(status_code: int) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        f"{status_code} Error", request=MagicMock(), response=resp
+    )
+    return resp
+
+
 @pytest.mark.asyncio
 async def test_submit_document_http_error_raises(client, staged_pdf):
-    mock_resp = MagicMock()
-    mock_resp.status_code = 500
-    mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
-        "500 Server Error", request=MagicMock(), response=MagicMock()
-    )
+    mock_resp = _status_error_resp(400)
 
     mock_client = AsyncMock()
     mock_client.post.return_value = mock_resp
@@ -60,6 +65,44 @@ async def test_submit_document_http_error_raises(client, staged_pdf):
     with patch("httpx.AsyncClient", return_value=mock_client):
         with pytest.raises(httpx.HTTPStatusError):
             await client.submit_document(file_path=staged_pdf)
+
+    # Non-transient error: no retry
+    mock_client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_submit_document_retries_on_queue_full(client, staged_pdf):
+    ok_resp = MagicMock()
+    ok_resp.status_code = 202
+    ok_resp.json.return_value = {"job_id": "dg-job-retry"}
+
+    mock_client = AsyncMock()
+    mock_client.post.side_effect = [_status_error_resp(429), _status_error_resp(503), ok_resp]
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+
+    with patch("httpx.AsyncClient", return_value=mock_client), \
+         patch("common.retry_utils.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+        job_id = await client.submit_document(file_path=staged_pdf)
+
+    assert job_id == "dg-job-retry"
+    assert mock_client.post.await_count == 3
+    assert mock_sleep.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_submit_document_queue_full_exhausts_retries(client, staged_pdf):
+    mock_client = AsyncMock()
+    mock_client.post.return_value = _status_error_resp(429)
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+
+    with patch("httpx.AsyncClient", return_value=mock_client), \
+         patch("common.retry_utils.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.submit_document(file_path=staged_pdf)
+
+    assert mock_client.post.await_count == 3
 
 
 @pytest.mark.asyncio

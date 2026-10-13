@@ -13,6 +13,7 @@ due to temporary issues like:
 The retry logic uses exponential backoff to avoid overwhelming the server.
 """
 
+import asyncio
 import time
 import functools
 import requests
@@ -38,6 +39,19 @@ def is_retryable_error(exception: Exception, allow_local_retries: bool = False) 
     Returns:
         True if the error is retryable, False otherwise
     """
+    # httpx errors (async clients). Only failures that are safe to retry for
+    # job-creating POSTs: 429 (queue full), 5xx, and connect-phase failures.
+    # Read timeouts are deliberately excluded as the server may have accepted the request.
+    try:
+        import httpx
+    except ImportError:
+        httpx = None
+    if httpx is not None and isinstance(exception, httpx.HTTPError):
+        if isinstance(exception, httpx.HTTPStatusError):
+            status_code = exception.response.status_code
+            return status_code == 429 or 500 <= status_code < 600
+        return isinstance(exception, (httpx.ConnectError, httpx.ConnectTimeout))
+
     # Network-related errors (HTTP and connection issues)
     if isinstance(exception, (requests.exceptions.HTTPError, requests.exceptions.RequestException)):
         # Check for HTTP 5xx errors
@@ -237,5 +251,51 @@ def retry_on_transient_error(
         
         return wrapper
     return decorator
+
+def async_retry_on_transient_error(
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+    backoff_multiplier: float = 2.0,
+    max_delay: float = 10.0,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """
+    Async counterpart of :func:`retry_on_transient_error` for coroutine functions.
+
+    Uses ``asyncio.sleep`` so the event loop is not blocked while backing off, and
+    relies on :func:`is_retryable_error` (which understands httpx errors such as
+    429 and 5xx responses) to decide whether to retry.
+
+    Example:
+        @async_retry_on_transient_error(max_retries=3)
+        async def submit(client, url):
+            resp = await client.post(url)
+            resp.raise_for_status()
+            return resp.json()
+    """
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1 or not is_retryable_error(e):
+                        raise
+
+                    backoff_time = min(
+                        initial_delay * (backoff_multiplier ** attempt),
+                        max_delay
+                    )
+                    logger.warning(
+                        f"{func.__name__} failed (attempt {attempt + 1}/{max_retries}). "
+                        f"Retrying in {backoff_time:.2f}s... Error: {e}"
+                    )
+                    await asyncio.sleep(backoff_time)
+
+            raise RuntimeError(f"{func.__name__} failed after all retries")
+
+        return wrapper
+    return decorator
+
 
 

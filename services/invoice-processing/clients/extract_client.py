@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from common.misc_utils import get_logger
+from common.retry_utils import async_retry_on_transient_error
 from schema import INVOICE_SCHEMA_PAYLOAD
 from settings import settings
 
@@ -44,51 +45,55 @@ class ExtractClient:
         job_id: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """Submit text or image for extraction. Returns extract job_id as string."""
+        """Submit text or file for extraction. Returns extract job_id as string."""
         schema = schema_name or kwargs.get("schema") or settings.invoice.extract_schema_name
         fp = file_path or kwargs.get("staged_path")
         if fp is not None:
             if isinstance(fp, str):
                 fp = Path(fp)
-            return await self.submit_image(fp, schema_name=schema)
+            return await self.submit_file(fp, schema_name=schema)
 
         cnt = content if content is not None else kwargs.get("text")
         if cnt is not None:
             if isinstance(cnt, bytes):
                 cnt = cnt.decode("utf-8")
-            return await self.submit_text(cnt, schema_name=schema)
+            return await self.submit_file(cnt, schema_name=schema)
 
         raise ValueError("Either content or file_path must be provided to submit_extraction")
 
-    async def submit_text(self, markdown_content: str, schema_name: str | None = None) -> str:
-        """POST Markdown to extract /v1/extract/jobs (async batch jobs endpoint).
+    async def submit_file(
+        self,
+        source: Path | str,
+        schema_name: str | None = None,
+    ) -> str:
+        """POST a file or Markdown string to extract /v1/extract/jobs.
+
+        *source* can be a :class:`~pathlib.Path` (any file type) or a plain
+        ``str`` (treated as Markdown content posted as ``invoice.md``).
 
         Returns extract job_id.
         """
         schema = schema_name or settings.invoice.extract_schema_name
         url = f"{self.base_url}/v1/extract/jobs"
-        files = {"files": ("invoice.md", markdown_content.encode("utf-8"), "text/markdown")}
+
+        if isinstance(source, Path):
+            mime = mimetypes.guess_type(str(source))[0] or "application/octet-stream"
+            with open(source, "rb") as fh:
+                file_bytes = fh.read()
+            files = {"files": (source.name, file_bytes, mime)}
+        else:
+            files = {"files": ("invoice.md", source.encode("utf-8"), "text/markdown")}
+
         data = {"schema_name": schema}
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-            resp = await client.post(url, files=files, data=data)
-            resp.raise_for_status()
-            return resp.json()["job_id"]
 
-    async def submit_image(self, image_path: Path, schema_name: str | None = None) -> str:
-        """POST image to extract /v1/extract/jobs (VLM path).
-
-        Returns extract job_id.
-        """
-        schema = schema_name or settings.invoice.extract_schema_name
-        url = f"{self.base_url}/v1/extract/jobs"
-        mime = mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-            with open(image_path, "rb") as fh:
-                files = {"files": (image_path.name, fh.read(), mime)}
-                data = {"schema_name": schema}
+        @async_retry_on_transient_error()
+        async def _post() -> str:
+            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
                 resp = await client.post(url, files=files, data=data)
-            resp.raise_for_status()
-            return resp.json()["job_id"]
+                resp.raise_for_status()
+                return resp.json()["job_id"]
+
+        return await _post()
 
     async def poll_job(
         self,
@@ -156,5 +161,3 @@ class ExtractClient:
         if last_resp is not None:
             last_resp.raise_for_status()
         raise RuntimeError(f"Failed to fetch extraction result for job {job_id}")
-
-    poll_extract_job = poll_job
