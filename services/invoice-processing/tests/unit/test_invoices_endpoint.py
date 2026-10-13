@@ -32,7 +32,6 @@ def _fake_job(job_id="job-abc", filename="inv.pdf", input_type="pdf", status="ac
     job.extract_job_id = None
     job.staged_header = None
     job.staged_lines = None
-    job.interface_ref = None
     job.job_metadata = None
     return job
 
@@ -42,15 +41,13 @@ def _fake_job(job_id="job-abc", filename="inv.pdf", input_type="pdf", status="ac
 # ---------------------------------------------------------------------------
 
 def test_update_request_all_fields():
-    """All three reviewer-editable fields are accepted."""
+    """Both reviewer-editable fields are accepted."""
     body = UpdateInvoiceJobRequest(
         staged_header={"invoice_num": "INV-001"},
         staged_lines=[{"amount": 100.0}],
-        interface_ref="AP-STANDARD",
     )
     assert body.staged_header == {"invoice_num": "INV-001"}
     assert body.staged_lines == [{"amount": 100.0}]
-    assert body.interface_ref == "AP-STANDARD"
 
 
 def test_update_request_all_optional_defaults_none():
@@ -58,14 +55,12 @@ def test_update_request_all_optional_defaults_none():
     body = UpdateInvoiceJobRequest()
     assert body.staged_header is None
     assert body.staged_lines is None
-    assert body.interface_ref is None
 
 
 def test_update_request_partial_update():
     """Only the supplied field is set; the rest remain None."""
-    body = UpdateInvoiceJobRequest(interface_ref="AP-INTERCOMPANY")
-    assert body.interface_ref == "AP-INTERCOMPANY"
-    assert body.staged_header is None
+    body = UpdateInvoiceJobRequest(staged_header={"invoice_num": "INV-002"})
+    assert body.staged_header == {"invoice_num": "INV-002"}
     assert body.staged_lines is None
 
 

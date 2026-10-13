@@ -5,7 +5,6 @@ export const INVOICE_JOB_STATUS = {
   EXTRACTING: 'extracting',
   STAGING: 'staging',
   REVIEW: 'review',
-  LOADING: 'loading',
   COMPLETED: 'completed',
   REJECTED: 'rejected',
   FAILED: 'failed',

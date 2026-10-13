@@ -9,7 +9,7 @@ const ReviewPage = () => {
       <Column lg={16} md={8} sm={4}>
         <Heading>Review Invoice: {jobId}</Heading>
         <p style={{ marginTop: '1rem', color: 'var(--cds-text-secondary)' }}>
-          Review extracted header fields, line items, and approve/reject staging.
+          Review extracted header fields, line items, and approve or reject the invoice.
         </p>
       </Column>
     </Grid>

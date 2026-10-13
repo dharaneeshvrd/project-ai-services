@@ -29,7 +29,6 @@ class InvoiceJobStatus(str, enum.Enum):
     EXTRACTING = "extracting"   # waiting for extract service
     STAGING = "staging"        # assembler running
     REVIEW = "review"          # awaiting human approve/reject
-    LOADING = "loading"        # DB load in progress
     COMPLETED = "completed"
     REJECTED = "rejected"      # human rejected
     FAILED = "failed"
@@ -68,14 +67,13 @@ class InvoiceJob(Base):
     # Result storage
     staged_header: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     staged_lines: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
-    interface_ref: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # Pipeline metadata (latency, timings, diagnostics)
     job_metadata: Mapped[Optional[dict]] = mapped_column("metadata", JSONB, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('accepted', 'routing', 'digitizing', 'extracting', 'staging', 'review', 'loading', 'completed', 'rejected', 'failed')",
+            "status IN ('accepted', 'routing', 'digitizing', 'extracting', 'staging', 'review', 'completed', 'rejected', 'failed')",
             name="chk_invoice_job_status",
         ),
         Index("idx_invoice_jobs_submitted_at_status", "submitted_at", "status"),

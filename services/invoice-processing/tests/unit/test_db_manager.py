@@ -30,7 +30,6 @@ def _make_job(job_id="job-1", filename="inv.pdf", input_type="pdf", status="acce
     job.extract_job_id = None
     job.staged_header = None
     job.staged_lines = None
-    job.interface_ref = None
     job.job_metadata = None
     return job
 

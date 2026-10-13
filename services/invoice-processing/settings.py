@@ -51,12 +51,6 @@ class InvoiceProcessingConfig(BaseSettings):
         description="Interval in seconds between downstream status polls",
     )
 
-    # DB load
-    db_load_enabled: bool = Field(
-        default=True,
-        description="Whether to load staged invoices into target DB",
-    )
-
     @property
     def staging_dir(self) -> Path:
         """Job staging directory root."""

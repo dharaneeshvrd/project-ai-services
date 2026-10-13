@@ -195,7 +195,7 @@ async def list_invoice_jobs(
 async def update_invoice_job(job_id: str, body: UpdateInvoiceJobRequest):
     """Correct extracted invoice data while the job is in REVIEW status.
 
-    Only ``staged_header``, ``staged_lines``, and ``interface_ref`` are
+    Only ``staged_header`` and ``staged_lines`` are
     accepted — these are the fields a human reviewer may need to fix before
     approving.  The job must be in ``review`` status; any other status
     returns HTTP 409.
@@ -220,7 +220,7 @@ async def delete_invoice_job(job_id: str):
 
     Terminal-status jobs (``completed``, ``rejected``, ``failed``) and jobs
     still in ``review`` may be deleted.  Jobs actively in-flight
-    (``routing``, ``digitizing``, ``extracting``, ``staging``, ``loading``)
+    (``routing``, ``digitizing``, ``extracting``, ``staging``)
     return HTTP 409 — cancel is not supported.
     """
     raise HTTPException(
@@ -236,10 +236,10 @@ async def delete_invoice_job(job_id: str):
 @router.post(
     "/{job_id}/approve",
     status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Approve invoice for database loading (stub — PR-7)",
+    summary="Approve reviewed invoice (stub — PR-7)",
 )
 async def approve_invoice_job(job_id: str):
-    """Approve a staged invoice for DB load. Implemented in PR-7."""
+    """Approve a reviewed invoice (review → completed). Implemented in PR-7."""
     raise HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
         detail="Invoice job approval is not yet implemented (PR-7).",

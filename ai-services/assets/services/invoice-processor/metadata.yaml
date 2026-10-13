@@ -30,7 +30,6 @@ about:
       - title: "Outputs"
         values:
           - "Structured invoice data (JSON)"
-          - "DB load status"
 
   - title: "Dependencies and integration"
     sections:

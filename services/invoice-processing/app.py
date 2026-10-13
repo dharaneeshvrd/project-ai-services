@@ -94,7 +94,7 @@ tags_metadata = [
 app = FastAPI(
     lifespan=lifespan,
     title="AI-Services Invoice Processing API",
-    description="End-to-end invoice document ingestion, extraction, and ERP staging microservice.",
+    description="End-to-end invoice document ingestion, extraction, and review microservice.",
     version="1.0.0",
     openapi_tags=tags_metadata,
 )

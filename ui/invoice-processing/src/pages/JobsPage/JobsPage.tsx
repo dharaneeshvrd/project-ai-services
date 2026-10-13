@@ -39,7 +39,6 @@ const STATUS_TAG_COLOR: Record<string, 'gray' | 'cool-gray' | 'warm-gray' | 'blu
   extracting: 'cyan',
   staging: 'teal',
   review: 'purple',
-  loading: 'blue',
   completed: 'green',
   rejected: 'red',
   failed: 'red',
@@ -51,10 +50,8 @@ const STATUS_TAG_COLOR: Record<string, 'gray' | 'cool-gray' | 'warm-gray' | 'blu
   STAGING: 'teal',
   REVIEW: 'purple',
   PENDING_REVIEW: 'purple',
-  LOADING: 'blue',
   COMPLETED: 'green',
   APPROVED: 'green',
-  LOADED: 'green',
   REJECTED: 'red',
   FAILED: 'red',
 };
@@ -73,10 +70,8 @@ function getStepProgress(status: string): { label: string; value: number } {
     case 'review':
     case 'pending_review':
       return { label: 'Human Review (4/5)', value: 0.8 };
-    case 'loading':
     case 'completed':
     case 'approved':
-    case 'loaded':
       return { label: 'Completed (5/5)', value: 1.0 };
     case 'rejected':
       return { label: 'Rejected', value: 0.8 };
@@ -163,7 +158,7 @@ const JobsPage: React.FC = () => {
     (j) => j.status?.toLowerCase() === 'review' || j.status?.toLowerCase() === 'pending_review'
   );
   const completedJobs = jobs.filter(
-    (j) => j.status?.toLowerCase() === 'completed' || j.status?.toLowerCase() === 'loaded'
+    (j) => j.status?.toLowerCase() === 'completed'
   );
 
   const currentTabJobs =

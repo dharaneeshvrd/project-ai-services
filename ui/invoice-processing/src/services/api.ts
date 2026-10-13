@@ -28,7 +28,6 @@ export interface InvoiceJob {
   extract_job_id: string | null;
   staged_header: Record<string, unknown> | null;
   staged_lines: Record<string, unknown>[] | null;
-  interface_ref: string | null;
   job_metadata: Record<string, unknown> | null;
 }
 

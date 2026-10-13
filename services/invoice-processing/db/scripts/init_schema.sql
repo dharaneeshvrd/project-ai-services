@@ -15,10 +15,9 @@ CREATE TABLE IF NOT EXISTS invoice_jobs (
     extract_job_id      VARCHAR(255),
     staged_header       JSONB,
     staged_lines        JSONB,
-    interface_ref       VARCHAR(255),
     metadata            JSONB,
     CONSTRAINT chk_invoice_job_status
-        CHECK (status IN ('accepted', 'routing', 'digitizing', 'extracting', 'staging', 'review', 'loading', 'completed', 'rejected', 'failed'))
+        CHECK (status IN ('accepted', 'routing', 'digitizing', 'extracting', 'staging', 'review', 'completed', 'rejected', 'failed'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_invoice_jobs_submitted_at_status

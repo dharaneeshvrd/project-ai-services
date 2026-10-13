@@ -44,7 +44,7 @@ const PIPELINE_STEPS = [
   'OCR Extraction',
   'Staging',
   'Human Review',
-  'Database Load',
+  'Completed',
 ];
 
 interface NotificationState {

@@ -79,7 +79,7 @@ const AppHeader = ({ isSideNavOpen, setIsSideNavOpen }: AppHeaderProps) => {
           <div className={styles.helpContent}>
             <h4>Welcome to Invoice Processing</h4>
             <p>
-              This application automates end-to-end invoice ingestion, extraction, and ERP staging.
+              This application automates end-to-end invoice ingestion, extraction, and review.
             </p>
 
             <h5>Key Features:</h5>
@@ -93,7 +93,7 @@ const AppHeader = ({ isSideNavOpen, setIsSideNavOpen }: AppHeaderProps) => {
             <ol>
               <li>Navigate to <strong>Submit</strong> to upload an invoice</li>
               <li>Track progress in the <strong>Jobs</strong> monitor</li>
-              <li>Inspect and confirm extracted fields in <strong>Review</strong> before DB load</li>
+              <li>Inspect and confirm extracted fields in <strong>Review</strong> and approve or reject</li>
             </ol>
           </div>
         </Modal>
