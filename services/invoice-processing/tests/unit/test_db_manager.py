@@ -114,9 +114,9 @@ class TestUpdateJob:
         mock_session.get.return_value = job
 
         with patch("db.manager.get_db_session", return_value=mock_session):
-            result = DatabaseManager.update_job("job-1", status="routing")
+            result = DatabaseManager.update_job("job-1", status="extracting")
 
-        assert job.status == "routing"
+        assert job.status == "extracting"
         mock_session.flush.assert_called_once()
 
     def test_sets_completed_at_on_terminal_status(self):
@@ -128,7 +128,7 @@ class TestUpdateJob:
         mock_session.get.return_value = job
 
         with patch("db.manager.get_db_session", return_value=mock_session):
-            DatabaseManager.update_job("job-1", status="completed")
+            DatabaseManager.update_job("job-1", status="approved")
 
         assert job.completed_at is not None
 

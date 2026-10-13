@@ -23,13 +23,10 @@ class Base(DeclarativeBase):
 
 
 class InvoiceJobStatus(str, enum.Enum):
-    ACCEPTED = "accepted"
-    ROUTING = "routing"
-    DIGITIZING = "digitizing"   # waiting for digitize service (PDF path)
-    EXTRACTING = "extracting"   # waiting for extract service
-    STAGING = "staging"        # assembler running
+    ACCEPTED = "accepted"      # job created, waiting to be picked up
+    EXTRACTING = "extracting"  # pipeline running (digitize → extract → assemble_invoice)
     REVIEW = "review"          # awaiting human approve/reject
-    COMPLETED = "completed"
+    APPROVED = "approved"      # human approved
     REJECTED = "rejected"      # human rejected
     FAILED = "failed"
 
@@ -73,7 +70,7 @@ class InvoiceJob(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('accepted', 'routing', 'digitizing', 'extracting', 'staging', 'review', 'completed', 'rejected', 'failed')",
+            "status IN ('accepted', 'extracting', 'review', 'approved', 'rejected', 'failed')",
             name="chk_invoice_job_status",
         ),
         Index("idx_invoice_jobs_submitted_at_status", "submitted_at", "status"),

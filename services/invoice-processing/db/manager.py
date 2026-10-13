@@ -83,7 +83,7 @@ class DatabaseManager:
                     setattr(job, key, value)
                 job.updated_at = datetime.now(timezone.utc)
                 # Mark completed_at when reaching a terminal state
-                if fields.get("status") in ("completed", "rejected", "failed"):
+                if fields.get("status") in ("approved", "rejected", "failed"):
                     if job.completed_at is None:
                         job.completed_at = datetime.now(timezone.utc)
                 session.flush()

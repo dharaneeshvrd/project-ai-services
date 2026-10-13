@@ -51,12 +51,10 @@ async def test_pdf_path_happy_path(staged_pdf):
     )
     mock_extract.poll_job.assert_awaited_once_with("ext-456")
 
-    # Check DB updates
-    assert mock_db.update_job.call_count == 4
-    mock_db.update_job.assert_any_call(job_id="job-pdf-1", status="digitizing")
-    mock_db.update_job.assert_any_call(job_id="job-pdf-1", status="digitizing", digitize_job_id="dg-123")
-    mock_db.update_job.assert_any_call(job_id="job-pdf-1", status="extracting")
-    mock_db.update_job.assert_any_call(job_id="job-pdf-1", status="extracting", extract_job_id="ext-456")
+    # Check DB updates — status is owned by the caller; only downstream job ids are recorded
+    assert mock_db.update_job.call_count == 2
+    mock_db.update_job.assert_any_call(job_id="job-pdf-1", digitize_job_id="dg-123")
+    mock_db.update_job.assert_any_call(job_id="job-pdf-1", extract_job_id="ext-456")
 
     assert result == {"AP_INVOICES_ALL": {"INVOICE_NUM": "INV-001"}, "AP_INVOICE_LINES_ALL": []}
 

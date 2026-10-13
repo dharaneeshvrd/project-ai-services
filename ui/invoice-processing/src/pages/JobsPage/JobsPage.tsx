@@ -34,23 +34,16 @@ import { listJobs, InvoiceJob } from '../../services/api';
 
 const STATUS_TAG_COLOR: Record<string, 'gray' | 'cool-gray' | 'warm-gray' | 'blue' | 'cyan' | 'teal' | 'purple' | 'green' | 'red' | 'magenta'> = {
   accepted: 'gray',
-  routing: 'blue',
-  digitizing: 'blue',
   extracting: 'cyan',
-  staging: 'teal',
   review: 'purple',
-  completed: 'green',
+  approved: 'green',
   rejected: 'red',
   failed: 'red',
   // support upper-case fallbacks
   ACCEPTED: 'gray',
-  ROUTING: 'blue',
-  DIGITIZING: 'blue',
   EXTRACTING: 'cyan',
-  STAGING: 'teal',
   REVIEW: 'purple',
   PENDING_REVIEW: 'purple',
-  COMPLETED: 'green',
   APPROVED: 'green',
   REJECTED: 'red',
   FAILED: 'red',
@@ -60,21 +53,16 @@ function getStepProgress(status: string): { label: string; value: number } {
   const norm = status.toLowerCase();
   switch (norm) {
     case 'accepted':
-    case 'routing':
-      return { label: 'Upload (1/5)', value: 0.2 };
-    case 'digitizing':
-      return { label: 'OCR / Vision (2/5)', value: 0.4 };
+      return { label: 'Accepted (1/4)', value: 0.25 };
     case 'extracting':
-    case 'staging':
-      return { label: 'Staging (3/5)', value: 0.6 };
+      return { label: 'Extracting (2/4)', value: 0.5 };
     case 'review':
     case 'pending_review':
-      return { label: 'Human Review (4/5)', value: 0.8 };
-    case 'completed':
+      return { label: 'Review (3/4)', value: 0.75 };
     case 'approved':
-      return { label: 'Completed (5/5)', value: 1.0 };
+      return { label: 'Approved (4/4)', value: 1.0 };
     case 'rejected':
-      return { label: 'Rejected', value: 0.8 };
+      return { label: 'Rejected', value: 0.75 };
     case 'failed':
       return { label: 'Failed', value: 0.5 };
     default:
@@ -157,12 +145,12 @@ const JobsPage: React.FC = () => {
   const pendingReviewJobs = jobs.filter(
     (j) => j.status?.toLowerCase() === 'review' || j.status?.toLowerCase() === 'pending_review'
   );
-  const completedJobs = jobs.filter(
-    (j) => j.status?.toLowerCase() === 'completed'
+  const approvedJobs = jobs.filter(
+    (j) => j.status?.toLowerCase() === 'approved'
   );
 
   const currentTabJobs =
-    tabIndex === 1 ? pendingReviewJobs : tabIndex === 2 ? completedJobs : jobs;
+    tabIndex === 1 ? pendingReviewJobs : tabIndex === 2 ? approvedJobs : jobs;
 
   const tableRows = currentTabJobs.map((job) => ({
     id: job.job_id,
@@ -237,7 +225,7 @@ const JobsPage: React.FC = () => {
                 Pending Review ({pendingReviewJobs.length})
               </span>
             </Tab>
-            <Tab>Completed ({completedJobs.length})</Tab>
+            <Tab>Approved ({approvedJobs.length})</Tab>
           </TabList>
 
           <TabPanels>

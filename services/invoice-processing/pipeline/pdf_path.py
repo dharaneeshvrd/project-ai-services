@@ -21,14 +21,15 @@ async def run_pdf_path(
 ) -> dict:
     """Full PDF-path orchestration.
 
-    1. Updates job status to 'digitizing'
-    2. Submits staged PDF to digitize service
-    3. Records digitize_job_id in DB
-    4. Polls digitize service until complete, retrieving Markdown content
-    5. Updates job status to 'extracting'
-    6. Submits Markdown content to extract service
-    7. Records extract_job_id in DB
-    8. Polls extract service until complete, returning raw extraction result dict.
+    The job status stays 'extracting' for the whole run (set by the caller);
+    this function only records the downstream job ids.
+
+    1. Submits staged PDF to digitize service
+    2. Records digitize_job_id in DB
+    3. Polls digitize service until complete, retrieving Markdown content
+    4. Submits Markdown content to extract service
+    5. Records extract_job_id in DB
+    6. Polls extract service until complete, returning raw extraction result dict.
 
     Args:
         job_id: Unique identifier for this processing job.
@@ -45,22 +46,20 @@ async def run_pdf_path(
         extract_client = ExtractClient(base_url=settings.invoice.extract_url)
 
     logger.info(f"[{job_id}] PDF path: starting digitize for {staged_path.name!r}")
-    db_manager.update_job(job_id=job_id, status="digitizing")
 
     digitize_job_id = await digitize_client.submit_document(job_id=job_id, file_path=staged_path)
-    db_manager.update_job(job_id=job_id, status="digitizing", digitize_job_id=digitize_job_id)
+    db_manager.update_job(job_id=job_id, digitize_job_id=digitize_job_id)
 
     markdown = await digitize_client.poll_job(digitize_job_id)
 
     logger.info(f"[{job_id}] PDF path: digitization complete, submitting to extract service")
-    db_manager.update_job(job_id=job_id, status="extracting")
 
     extract_job_id = await extract_client.submit_extraction(
         job_id=job_id,
         content=markdown,
         schema_name=settings.invoice.extract_schema_name,
     )
-    db_manager.update_job(job_id=job_id, status="extracting", extract_job_id=extract_job_id)
+    db_manager.update_job(job_id=job_id, extract_job_id=extract_job_id)
 
     result = await extract_client.poll_job(extract_job_id)
     logger.info(f"[{job_id}] PDF path: extraction complete")

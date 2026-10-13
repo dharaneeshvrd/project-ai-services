@@ -1,11 +1,8 @@
 export const INVOICE_JOB_STATUS = {
   ACCEPTED: 'accepted',
-  ROUTING: 'routing',
-  DIGITIZING: 'digitizing',
   EXTRACTING: 'extracting',
-  STAGING: 'staging',
   REVIEW: 'review',
-  COMPLETED: 'completed',
+  APPROVED: 'approved',
   REJECTED: 'rejected',
   FAILED: 'failed',
 } as const;

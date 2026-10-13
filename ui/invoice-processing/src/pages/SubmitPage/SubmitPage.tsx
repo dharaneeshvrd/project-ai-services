@@ -40,11 +40,10 @@ function getRoutingPath(file: File): 'One-Shot (image → extract VLM)' | 'PDF p
 }
 
 const PIPELINE_STEPS = [
-  'Document Upload',
-  'OCR Extraction',
-  'Staging',
-  'Human Review',
-  'Completed',
+  'Accepted',
+  'Extracting',
+  'Review',
+  'Approved',
 ];
 
 interface NotificationState {

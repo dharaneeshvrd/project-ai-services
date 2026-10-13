@@ -48,13 +48,17 @@ def _stage_uploaded_file(job_id: str, file: UploadFile) -> Path:
 async def _run_pipeline(job_id: str, staged_path: Path, input_type: str) -> None:
     """Background pipeline task — dispatches to pdf_path or oneshot_path.
 
+    The job moves ``accepted`` → ``extracting`` as soon as it is picked up and
+    stays ``extracting`` through digitize, extract and ``assemble_invoice``;
+    it then moves directly to ``review`` (PR-7).
+
     Routing decision:
     - ``"image"`` → One-Shot path: forward directly to extract VLM endpoint.
     - ``"pdf"``   → PDF path: forward to digitize as-is; digitize owns
                     internal type detection.
     """
     try:
-        db_manager.update_job(job_id=job_id, status="routing")
+        db_manager.update_job(job_id=job_id, status="extracting")
 
         if input_type == "image":
             logger.info(
@@ -218,10 +222,9 @@ async def update_invoice_job(job_id: str, body: UpdateInvoiceJobRequest):
 async def delete_invoice_job(job_id: str):
     """Delete an invoice job record and any associated staged data.
 
-    Terminal-status jobs (``completed``, ``rejected``, ``failed``) and jobs
+    Terminal-status jobs (``approved``, ``rejected``, ``failed``) and jobs
     still in ``review`` may be deleted.  Jobs actively in-flight
-    (``routing``, ``digitizing``, ``extracting``, ``staging``)
-    return HTTP 409 — cancel is not supported.
+    (``accepted``, ``extracting``) return HTTP 409 — cancel is not supported.
     """
     raise HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -239,7 +242,7 @@ async def delete_invoice_job(job_id: str):
     summary="Approve reviewed invoice (stub — PR-7)",
 )
 async def approve_invoice_job(job_id: str):
-    """Approve a reviewed invoice (review → completed). Implemented in PR-7."""
+    """Approve a reviewed invoice (review → approved). Implemented in PR-7."""
     raise HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
         detail="Invoice job approval is not yet implemented (PR-7).",

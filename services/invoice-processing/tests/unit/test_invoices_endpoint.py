@@ -218,10 +218,10 @@ class TestListInvoiceJobs:
              patch("api.v1.invoices._run_pipeline"):
             mock_mgr.list_jobs.return_value = ([], 0)
 
-            client.get("/v1/invoices?status=completed")
+            client.get("/v1/invoices?status=approved")
 
         mock_mgr.list_jobs.assert_called_once_with(
-            page=1, page_size=20, status_filter="completed"
+            page=1, page_size=20, status_filter="approved"
         )
 
 
@@ -306,8 +306,8 @@ class TestRunPipelineRouting:
         assert any("PDF path" in m for m in info_messages), \
             f"Expected INFO log containing 'PDF path'; got: {info_messages}"
 
-    def test_pipeline_marks_routing_status_first(self, tmp_path):
-        """db_manager.update_job must be called with status='routing' before the path call."""
+    def test_pipeline_marks_extracting_status_first(self, tmp_path):
+        """db_manager.update_job must be called with status='extracting' before the path call."""
         from api.v1.invoices import _run_pipeline
 
         staged = self._make_staged_path(tmp_path, "scan.jpg")
@@ -326,10 +326,10 @@ class TestRunPipelineRouting:
             )
             asyncio.run(_run_pipeline("job-order-1", staged, "image"))
 
-        assert ("update_job", "routing") in call_order
-        routing_idx = call_order.index(("update_job", "routing"))
+        assert ("update_job", "extracting") in call_order
+        extracting_idx = call_order.index(("update_job", "extracting"))
         oneshot_idx = call_order.index("oneshot")
-        assert routing_idx < oneshot_idx
+        assert extracting_idx < oneshot_idx
 
     def test_pipeline_marks_failed_on_path_error(self, tmp_path):
         """If the path function raises, job must be marked 'failed'."""
