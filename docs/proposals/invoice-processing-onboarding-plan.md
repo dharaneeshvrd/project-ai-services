@@ -9,7 +9,7 @@
 | Service | Responsibility |
 |---------|---------------|
 | **`invoice-processing` UI** *(existing — reused as-is)* | Frontend web app; file upload, pipeline status, human review, interface viewer — **no changes required** |
-| **`invoice-processing` backend** *(new — replaces existing backend entirely)* | E2E orchestration — pipeline routing (image vs PDF), calling digitize (PDF→MD) and extract, assembling output JSON, staging, review, and DB load |
+| **`invoice-processing` backend** *(new — replaces existing backend entirely)* | E2E orchestration — pipeline routing (image vs PDF), calling digitize (PDF→MD) and extract, assembling output JSON, staging, review, and persisting the extracted content to PostgreSQL |
 | **`digitize`** | Receives any PDF file; internally detects digital vs scanned; routes to Docling (digital) or RapidOCR (scanned); always outputs **Markdown** |
 | **`extract`** | Structured field extraction from `.txt` / `.md` files (text LLM) or image files (multimodal VLM); does **not** receive raw PDFs. **Model under consideration: `Ministral-3B-14b-instruct`** (used for both text and image extraction paths) |
 
@@ -17,7 +17,7 @@
 
 - 🖼️ **Image flow:** `invoice-processing` forwards image invoices (`.png`, `.jpg`, `.tiff`) directly to `extract` (VLM path) — `digitize` is not involved.
 
-- ⚠️ **Deviation from original app:** The original invoice-processing application writes to **Oracle EBS** (`AP_INVOICES_INTERFACE` / `AP_INVOICE_LINES_INTERFACE`). This onboarding targets **Oracle DB / IBM i DB2** as the output database. All interface table names and connection configuration reflect this change.
+- ⚠️ **Deviation from original app:** The original invoice-processing application writes to **Oracle EBS** (`AP_INVOICES_INTERFACE` / `AP_INVOICE_LINES_INTERFACE`). This onboarding does **not** load into any external database. Instead, the extracted invoice content (header + lines JSON) is persisted to the **PostgreSQL** database that already stores all job metadata. Loading into an external Oracle DB / IBM i DB2 is deferred — see [Future Plan](#future-plan) (F-4).
 
 ---
 
@@ -68,11 +68,11 @@ flowchart TD
         direction TB
         STAGING["Staging Agent\nValidate · Normalise · Store"]
         REVIEW["Human Review\nApprove / Edit / Reject"]
-        LOAD["Interface Load Agent"]
-        STAGING --> REVIEW -->|"Approved"| LOAD
+        PERSIST["Persistence Agent"]
+        STAGING --> REVIEW -->|"Approved"| PERSIST
     end
 
-    LOAD -->|"invoice JSON  ·  lines JSON"| ORACLE[("Oracle DB\n/ IBM i DB2")]
+    PERSIST -->|"invoice JSON  ·  lines JSON"| POSTGRES[("PostgreSQL\n(job metadata + extracted content)")]
     REVIEW -->|"Rejected"| REJECTED(["❌ Rejected"])
 
     %% ── STYLES ──────────────────────────────────────────────────
@@ -80,13 +80,13 @@ flowchart TD
     classDef svc_digitize fill:#f0fdf4,color:#1f2328,stroke:#1a7a4a,stroke-width:2px
     classDef svc_extract  fill:#fdf4ff,color:#1f2328,stroke:#7c5cd8,stroke-width:2px
     classDef ui           fill:#1f2328,color:#fff,stroke:#1f2328,stroke-width:2px
-    classDef oracle       fill:#1f2328,color:#fff,stroke:#1f2328,stroke-width:2px
+    classDef postgres     fill:#1f2328,color:#fff,stroke:#1f2328,stroke-width:2px
 
     class SVC_IP svc_ip
     class SVC_DIGITIZE svc_digitize
     class SVC_EXTRACT_VLM,SVC_EXTRACT_TXT svc_extract
     class UI,ROUTER,IP_FWD,SCHEMA_REG ui
-    class ORACLE,REJECTED oracle
+    class POSTGRES,REJECTED postgres
 ```
 
 ---
@@ -121,11 +121,11 @@ flowchart TD
 
 | # | Story | Description |
 |---|-------|-------------|
-| I-1 | **Service scaffold** | New FastAPI service with job model, DB schema, settings, health endpoint; registers invoice extraction schema with `extract` on startup |
+| I-1 | **Service scaffold** | New FastAPI service with job model, PostgreSQL DB schema (job metadata + extracted invoice content), settings, health endpoint; registers invoice extraction schema with `extract` on startup |
 | I-2 | **Pipeline router** | Single-stage routing: detect input type (image → One-Shot path; PDF → PDF path). No PDF-type detection in `invoice-processing` — that is owned by `digitize`. |
 | I-3 | **PDF-Path orchestration** | PDF → send to `digitize` → receive Markdown back → forward Markdown to `extract` (text LLM) → assemble invoice JSON. Applies to all PDFs regardless of digital/scanned. |
 | I-4 | **One-Shot orchestration** | Image invoice → call `extract` VLM endpoint directly → map result to invoice JSON |
-| I-5 | **Invoice JSON output + API** | Unified output schema (`AP_INVOICES_ALL` + `AP_INVOICE_LINES_ALL`); job status + result endpoints |
+| I-5 | **Invoice JSON output + API** | Unified output schema (`AP_INVOICES_ALL` + `AP_INVOICE_LINES_ALL`); extracted content persisted to PostgreSQL; job status + result endpoints |
 
 ---
 
@@ -244,14 +244,14 @@ flowchart TD
 **Priority:** High — gates all I-track stories
 **Can run in parallel with:** D-1, E-1, E-2
 
-**What:** Scaffold the new `invoice-processing` FastAPI service: project structure, DB schema (job + document tables), settings, health endpoint, Containerfile, Makefile — matching the conventions of `digitize` and `extract`.
+**What:** Scaffold the new `invoice-processing` FastAPI service: project structure, PostgreSQL DB schema (job + document tables, plus storage for extracted invoice header/lines content), settings, health endpoint, Containerfile, Makefile — matching the conventions of `digitize` and `extract`.
 
 **Where:**
 - `services/invoice-processing/` *(new directory)*
 
 **Acceptance criteria:**
 - Service starts and `/health` returns 200
-- DB schema creates job and document tables
+- DB schema creates job and document tables, and tables/columns to hold the extracted invoice content
 - Settings load from env vars
 - Containerfile builds successfully
 - Structure mirrors `digitize`/`extract` conventions
@@ -315,6 +315,7 @@ flowchart TD
 
 **Acceptance criteria:**
 - Both paths (PDF-Path and One-Shot) produce identical invoice JSON structure
+- Approved invoice content is persisted to PostgreSQL alongside job metadata (no external DB load)
 - `POST /invoices` accepts file upload + optional metadata; returns `job_id`
 - `GET /invoices/{job_id}` returns job status and result
 - OpenAPI docs complete
@@ -374,6 +375,7 @@ The following features exist in the original invoice-processing application but 
 | F-1 | **Batch document processing** | Submit multiple invoice files in a single job; track per-document status within the batch. Original app supports `POST /api/pipeline/submit-batch`. |
 | F-2 | **User authentication / authorisation** | JWT-based auth, role checks (reviewer vs admin). The existing UI relies on the current `app-frontend` auth system; the new backend defers this entirely. |
 | F-3 | **Pipeline resume from mid-stage entrypoints** | Ability to restart a job from Staging, Review, or Interface Load independently — e.g. `POST /api/pipeline/start-from-staging`, `start-from-review`, `start-from-load`. Not needed for the initial single-document happy path. |
+| F-4 | **Load processed invoices into external Oracle DB / IBM i DB2** | Interface load of approved invoice header + lines into an external Oracle DB or IBM i DB2 (original app targets `AP_INVOICES_INTERFACE` / `AP_INVOICE_LINES_INTERFACE`). For now, extracted content is only persisted to the PostgreSQL metadata database. |
 
 ---
 
