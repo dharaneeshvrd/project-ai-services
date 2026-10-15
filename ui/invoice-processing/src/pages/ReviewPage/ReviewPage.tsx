@@ -62,38 +62,54 @@ const STEP_INDEX: Record<string, number> = {
 
 // Fields the reviewer may edit inline when the job is in review status
 const EDITABLE_HEADER_KEYS = new Set([
-  'invoice_number', 'invoice_date', 'due_date', 'vendor_name',
-  'vendor_address', 'bill_to_name', 'bill_to_address',
-  'subtotal', 'tax', 'total', 'currency',
-  'payment_terms', 'po_number', 'notes',
+  'INVOICE_NUM', 'INVOICE_DATE', 'INVOICE_TYPE_LOOKUP_CODE', 'VENDOR_NAME',
+  'VENDOR_NUM', 'SELLER', 'SELLER_ADDRESS', 'CLIENT', 'CLIENT_ADDRESS',
+  'INVOICE_AMOUNT', 'INVOICE_CURRENCY_CODE', 'TAX_AMOUNT', 'TOTAL_TAX_AMOUNT',
+  'FREIGHT_AMOUNT', 'TERMS_NAME', 'DESCRIPTION',
 ]);
 
 // Columns shown in the lines table
 const LINE_COLS: { key: string; label: string }[] = [
-  { key: 'line_number',  label: '#'           },
-  { key: 'description', label: 'Description'  },
-  { key: 'quantity',    label: 'Qty'          },
-  { key: 'unit_price',  label: 'Unit Price'   },
-  { key: 'amount',      label: 'Amount'       },
-  { key: 'tax_code',    label: 'Tax Code'     },
-  { key: 'po_number',   label: 'PO #'         },
+  { key: 'LINE_NUMBER',        label: '#'           },
+  { key: 'DESCRIPTION',        label: 'Description'  },
+  { key: 'QUANTITY_INVOICED',  label: 'Qty'          },
+  { key: 'UNIT_PRICE',         label: 'Unit Price'   },
+  { key: 'AMOUNT',             label: 'Amount'       },
+  { key: 'TAX_CODE',           label: 'Tax Code'     },
+  { key: 'PO_NUMBER',          label: 'PO #'         },
 ];
 
 const HEADER_LABEL: Record<string, string> = {
-  invoice_number: 'Invoice Number',
-  invoice_date: 'Invoice Date',
-  due_date: 'Due Date',
-  vendor_name: 'Vendor Name',
-  vendor_address: 'Vendor Address',
-  bill_to_name: 'Bill To',
-  bill_to_address: 'Bill To Address',
-  subtotal: 'Subtotal',
-  tax: 'Tax',
-  total: 'Total',
-  currency: 'Currency',
-  payment_terms: 'Payment Terms',
-  po_number: 'PO Number',
-  notes: 'Notes',
+  INVOICE_NUM: 'Invoice Number',
+  INVOICE_DATE: 'Invoice Date',
+  INVOICE_TYPE_LOOKUP_CODE: 'Invoice Type',
+  VENDOR_NAME: 'Vendor Name',
+  VENDOR_NUM: 'Vendor Number',
+  VENDOR_ID: 'Vendor ID',
+  VENDOR_SITE_ID: 'Vendor Site ID',
+  VENDOR_SITE_CODE: 'Vendor Site Code',
+  INVOICE_AMOUNT: 'Invoice Amount',
+  INVOICE_CURRENCY_CODE: 'Currency',
+  EXCHANGE_RATE: 'Exchange Rate',
+  EXCHANGE_RATE_TYPE: 'Exchange Rate Type',
+  EXCHANGE_DATE: 'Exchange Date',
+  TERMS_ID: 'Terms ID',
+  TERMS_NAME: 'Terms Name',
+  DESCRIPTION: 'Description',
+  SOURCE: 'Source',
+  ORG_ID: 'Org ID',
+  OPERATING_UNIT: 'Operating Unit',
+  PAY_GROUP_LOOKUP_CODE: 'Pay Group',
+  PAYMENT_METHOD_LOOKUP_CODE: 'Payment Method',
+  TAX_AMOUNT: 'Tax Amount',
+  TOTAL_TAX_AMOUNT: 'Total Tax Amount',
+  FREIGHT_AMOUNT: 'Freight Amount',
+  SELLER: 'Seller',
+  SELLER_ADDRESS: 'Seller Address',
+  CLIENT: 'Client',
+  CLIENT_ADDRESS: 'Client Address',
+  _job_id: 'Job ID',
+  _source_file: 'Source File',
 };
 
 const ZOOM_STEP = 25;
@@ -456,8 +472,8 @@ const ReviewPage: React.FC = () => {
               <Tile style={{ padding: '1rem', height: '100%' }}>
                 <p className="cds--label-01" style={{ marginBottom: '0.25rem' }}>Total</p>
                 <strong className="cds--productive-heading-03">
-                  {job?.staged_header?.total != null
-                    ? `${job.staged_header.currency ?? ''} ${job.staged_header.total}`.trim()
+                  {job?.staged_header?.INVOICE_AMOUNT != null
+                    ? `${job.staged_header.INVOICE_CURRENCY_CODE ?? ''} ${job.staged_header.INVOICE_AMOUNT}`.trim()
                     : '—'}
                 </strong>
               </Tile>
