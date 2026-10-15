@@ -12,24 +12,26 @@ INVOICE_SCHEMA_PAYLOAD = {
         "properties": {
             "AP_INVOICES_ALL": {
                 "type": "object",
-                "required": [
-                    "INVOICE_NUM",
-                    "INVOICE_DATE",
-                    "VENDOR_NAME",
-                    "INVOICE_AMOUNT",
-                    "INVOICE_CURRENCY_CODE",
-                ],
+                # NOTE: required fields are flagged per-property ("required": True) rather
+                # than via a "required" array here. The extract service's schema
+                # normalizer strips any "required" key found on a property schema and
+                # rebuilds the parent's "required" array from the True flags, so a
+                # standard array on this nested object would be silently dropped.
                 "properties": {
-                    "INVOICE_NUM": {"type": "string"},
+                    "INVOICE_NUM": {"type": "string", "required": True},
                     "INVOICE_TYPE_LOOKUP_CODE": {"type": ["string", "null"], "default": "STANDARD"},
-                    "INVOICE_DATE": {"type": "string", "description": "DD-MON-YY preferred"},
+                    "INVOICE_DATE": {
+                        "type": "string",
+                        "description": "DD-MON-YY preferred",
+                        "required": True,
+                    },
                     "VENDOR_ID": {"type": ["integer", "null"]},
                     "VENDOR_NUM": {"type": ["string", "null"]},
-                    "VENDOR_NAME": {"type": "string"},
+                    "VENDOR_NAME": {"type": "string", "required": True},
                     "VENDOR_SITE_ID": {"type": ["integer", "null"]},
                     "VENDOR_SITE_CODE": {"type": ["string", "null"]},
-                    "INVOICE_AMOUNT": {"type": "number"},
-                    "INVOICE_CURRENCY_CODE": {"type": "string"},
+                    "INVOICE_AMOUNT": {"type": "number", "required": True},
+                    "INVOICE_CURRENCY_CODE": {"type": "string", "required": True},
                     "EXCHANGE_RATE": {"type": ["number", "null"]},
                     "EXCHANGE_RATE_TYPE": {"type": ["string", "null"]},
                     "EXCHANGE_DATE": {"type": ["string", "null"]},
