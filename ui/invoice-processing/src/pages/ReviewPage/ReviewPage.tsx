@@ -108,7 +108,8 @@ const HEADER_LABEL: Record<string, string> = {
   SELLER_ADDRESS: 'Seller Address',
   CLIENT: 'Client',
   CLIENT_ADDRESS: 'Client Address',
-  _job_id: 'Job ID',
+  // Metadata fields (prefixed with _ by the pipeline, always shown last)
+  _job_id:      'Job ID',
   _source_file: 'Source File',
 };
 
@@ -341,6 +342,12 @@ const ReviewPage: React.FC = () => {
 
   const headerRows = job?.staged_header
     ? Object.entries(job.staged_header)
+        .sort(([a], [b]) => {
+          const aMeta = a.startsWith('_');
+          const bMeta = b.startsWith('_');
+          if (aMeta !== bMeta) return aMeta ? 1 : -1;
+          return 0;
+        })
     : [];
 
   const lineItems: Record<string, unknown>[] = Array.isArray(job?.staged_lines)
