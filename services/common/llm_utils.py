@@ -350,12 +350,8 @@ def query_vllm_payload(
         max_tokens=effective_max_tokens,
     )
     message_array.append({
-        "role": "system",
-        "content": final_system_content,
-    })
-    message_array.append({
         "role": "user",
-        "content": question,
+        "content": final_system_content,
     })
 
     logger.debug(f"Message array length: {len(message_array)}")
