@@ -80,88 +80,121 @@ const HEADERS = [
   { key: 'actions', header: 'Actions' },
 ];
 
+// Per-tab state shape
+interface TabState {
+  jobs: InvoiceJob[];
+  loading: boolean;
+  error: string | null;
+  page: number;
+  pageSize: number;
+  totalItems: number;
+}
+
+function makeTabState(): TabState {
+  return { jobs: [], loading: true, error: null, page: 1, pageSize: 10, totalItems: 0 };
+}
+
+// The three tabs map to these status filters (null = no filter = all jobs)
+const TAB_STATUS: [null, 'review', 'approved'] = [null, 'review', 'approved'];
+
+const TAB_TITLES = ['Pipeline History', 'Pending Review', 'Approved Invoices'] as const;
+const TAB_DESCRIPTIONS = [
+  'Real-time status of submitted invoices',
+  'Invoices awaiting human review',
+  'Invoices that have been approved',
+] as const;
+
 const JobsPage: React.FC = () => {
   const navigate = useNavigate();
-  const [jobs, setJobs] = useState<InvoiceJob[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [tabIndex, setTabIndex] = useState(0);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
-  const [totalItems, setTotalItems] = useState(0);
 
-  const fetchJobs = useCallback(async (showSkeleton = false) => {
-    if (showSkeleton) setLoading(true);
+  // One state object per tab so each has its own loading / pagination / data
+  const [allTab, setAllTab] = useState<TabState>(makeTabState());
+  const [reviewTab, setReviewTab] = useState<TabState>(makeTabState());
+  const [approvedTab, setApprovedTab] = useState<TabState>(makeTabState());
+
+  const tabStates = [allTab, reviewTab, approvedTab];
+  const tabSetters = [setAllTab, setReviewTab, setApprovedTab];
+
+  // Build a stable fetch function for a given tab index
+  const fetchTab = useCallback(async (tIdx: number, showSkeleton: boolean) => {
+    const setState = tabSetters[tIdx];
+    const { page, pageSize } = tabStates[tIdx];
+    const statusFilter = TAB_STATUS[tIdx];
+
+    if (showSkeleton) setState((s) => ({ ...s, loading: true }));
     try {
-      const res = await listJobs({ page, page_size: pageSize });
-      setJobs(res.data || []);
-      setTotalItems(res.pagination?.total_items || res.data?.length || 0);
-      setError(null);
+      const res = await listJobs({
+        page,
+        page_size: pageSize,
+        ...(statusFilter ? { status: statusFilter } : {}),
+      });
+      setState((s) => ({
+        ...s,
+        jobs: res.data || [],
+        totalItems: res.pagination?.total_items ?? res.data?.length ?? 0,
+        error: null,
+        loading: false,
+      }));
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail ||
         (err as Error)?.message ||
         'Failed to fetch jobs.';
-      setError(msg);
-    } finally {
-      if (showSkeleton) setLoading(false);
+      setState((s) => ({ ...s, error: msg, loading: false }));
     }
-  }, [page, pageSize]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allTab.page, allTab.pageSize, reviewTab.page, reviewTab.pageSize, approvedTab.page, approvedTab.pageSize]);
 
+  // Initial load + polling for all three tabs
   useEffect(() => {
-    let ignore = false;
+    let cancelled = false;
 
-    const load = async () => {
-      try {
-        const res = await listJobs({ page, page_size: pageSize });
-        if (!ignore) {
-          setJobs(res.data || []);
-          setTotalItems(res.pagination?.total_items || res.data?.length || 0);
-          setError(null);
-        }
-      } catch (err: unknown) {
-        if (!ignore) {
-          const msg =
-            (err as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail ||
-            (err as Error)?.message ||
-            'Failed to fetch jobs.';
-          setError(msg);
-        }
-      } finally {
-        if (!ignore) {
-          setLoading(false);
-        }
-      }
+    const loadAll = async () => {
+      await Promise.all(
+        ([0, 1, 2] as const).map(async (tIdx) => {
+          const setState = tabSetters[tIdx];
+          const { page, pageSize } = tabStates[tIdx];
+          const statusFilter = TAB_STATUS[tIdx];
+          try {
+            const res = await listJobs({
+              page,
+              page_size: pageSize,
+              ...(statusFilter ? { status: statusFilter } : {}),
+            });
+            if (!cancelled) {
+              setState((s) => ({
+                ...s,
+                jobs: res.data || [],
+                totalItems: res.pagination?.total_items ?? res.data?.length ?? 0,
+                error: null,
+                loading: false,
+              }));
+            }
+          } catch (err: unknown) {
+            if (!cancelled) {
+              const msg =
+                (err as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail ||
+                (err as Error)?.message ||
+                'Failed to fetch jobs.';
+              setState((s) => ({ ...s, error: msg, loading: false }));
+            }
+          }
+        })
+      );
     };
 
-    load();
-    const interval = setInterval(() => fetchJobs(false), 5000);
+    loadAll();
+    const interval = setInterval(() => {
+      if (!cancelled) loadAll();
+    }, 5000);
     return () => {
-      ignore = true;
+      cancelled = true;
       clearInterval(interval);
     };
-  }, [fetchJobs, page, pageSize]);
-
-  const pendingReviewJobs = jobs.filter(
-    (j) => j.status?.toLowerCase() === 'review' || j.status?.toLowerCase() === 'pending_review'
-  );
-  const approvedJobs = jobs.filter(
-    (j) => j.status?.toLowerCase() === 'approved'
-  );
-
-  const currentTabJobs =
-    tabIndex === 1 ? pendingReviewJobs : tabIndex === 2 ? approvedJobs : jobs;
-
-  const tableRows = currentTabJobs.map((job) => ({
-    id: job.job_id,
-    filename: job.filename,
-    status: job.status,
-    pipeline_path: job.pipeline_path ?? null,
-    progress: job.status,
-    error: job.error || '—',
-    submitted_at: job.submitted_at ? new Date(job.submitted_at).toLocaleString() : '—',
-    actions: job.job_id,
-  }));
+  // Re-run when any tab's page/pageSize changes
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allTab.page, allTab.pageSize, reviewTab.page, reviewTab.pageSize, approvedTab.page, approvedTab.pageSize]);
 
   return (
     <Grid className="cds--css-grid--full-width" style={{ padding: '2rem' }}>
@@ -194,7 +227,9 @@ const JobsPage: React.FC = () => {
               kind="ghost"
               renderIcon={Renew}
               iconDescription="Refresh"
-              onClick={() => fetchJobs(true)}
+              onClick={() => {
+                tabSetters.forEach((_, i) => fetchTab(i, true));
+              }}
             >
               Refresh
             </Button>
@@ -207,192 +242,196 @@ const JobsPage: React.FC = () => {
           </div>
         </div>
 
-        {error && (
-          <InlineNotification
-            kind="error"
-            title="Error loading jobs."
-            subtitle={error}
-            onCloseButtonClick={() => setError(null)}
-            style={{ marginBottom: '1rem', maxWidth: '100%' }}
-          />
-        )}
-
         <Tabs selectedIndex={tabIndex} onChange={({ selectedIndex }) => setTabIndex(selectedIndex)}>
           <TabList aria-label="Job views" style={{ marginBottom: '1rem' }}>
-            <Tab>All Jobs ({jobs.length})</Tab>
+            <Tab>All Jobs ({allTab.totalItems})</Tab>
+            {/* Pending Review count badge — use Tag inside Tab, not inline colour override */}
             <Tab>
-              <span style={pendingReviewJobs.length > 0 ? { color: '#8a3ffc', fontWeight: 600 } : undefined}>
-                Pending Review ({pendingReviewJobs.length})
-              </span>
+              Pending Review
+              {reviewTab.totalItems > 0 && (
+                <Tag type="purple" size="sm" style={{ marginLeft: '0.5rem' }}>
+                  {reviewTab.totalItems}
+                </Tag>
+              )}
             </Tab>
-            <Tab>Approved ({approvedJobs.length})</Tab>
+            <Tab>Approved ({approvedTab.totalItems})</Tab>
           </TabList>
 
           <TabPanels>
-            <TabPanel style={{ padding: 0 }}>
-              {loading && jobs.length === 0 ? (
-                <DataTableSkeleton headers={HEADERS} rowCount={5} />
-              ) : (
-                <DataTable rows={tableRows} headers={HEADERS}>
-                  {({
-                    rows,
-                    headers,
-                    getHeaderProps,
-                    getRowProps,
-                    getTableProps,
-                    getTableContainerProps,
-                    onInputChange,
-                  }) => (
-                    <TableContainer
-                      title="Pipeline History"
-                      description="Real-time status of submitted invoices"
-                      {...getTableContainerProps()}
-                    >
-                      <TableToolbar>
-                        <TableToolbarContent>
-                          <TableToolbarSearch onChange={onInputChange} placeholder="Search jobs…" />
-                        </TableToolbarContent>
-                      </TableToolbar>
-                      <Table {...getTableProps()}>
-                        <TableHead>
-                          <TableRow>
-                            {headers.map((header) => {
-                              const headerProps = getHeaderProps({ header });
-                              return (
-                                <TableHeader {...headerProps} key={header.key}>
-                                  {header.header}
-                                </TableHeader>
-                              );
-                            })}
-                          </TableRow>
-                        </TableHead>
-                        <TableBody>
-                          {rows.length === 0 ? (
-                            <TableRow>
-                              <TableCell colSpan={headers.length} style={{ textAlign: 'center', padding: '2rem', color: 'var(--cds-text-secondary)' }}>
-                                No jobs found.
-                              </TableCell>
-                            </TableRow>
-                          ) : (
-                            rows.map((row) => {
-                              const job = jobs.find((j) => j.job_id === row.id);
-                              const stepProgress = getStepProgress(row.cells.find((c) => c.info.header === 'status')?.value || '');
-                              const isReviewable =
-                                job?.status?.toLowerCase() === 'review' ||
-                                job?.status?.toLowerCase() === 'pending_review';
+            {tabStates.map((tabState, tIdx) => {
+              const { jobs: tabJobs, loading, error, page, pageSize, totalItems } = tabState;
+              const tabRows = tabJobs.map((job) => ({
+                id: job.job_id,
+                filename: job.filename,
+                status: job.status,
+                pipeline_path: job.pipeline_path ?? null,
+                progress: job.status,
+                error: job.error || '—',
+                submitted_at: job.submitted_at ? new Date(job.submitted_at).toLocaleString() : '—',
+                actions: job.job_id,
+              }));
 
-                              const rowProps = getRowProps({ row });
-                              return (
-                                <TableRow {...rowProps} key={row.id}>
-                                  {row.cells.map((cell) => {
-                                    if (cell.info.header === 'pipeline_path') {
-                                      const val: string | null = cell.value;
-                                      if (!val) {
-                                        return <TableCell key={cell.id}>—</TableCell>;
-                                      }
-                                      const isImage = val === 'oneshot';
-                                      return (
-                                        <TableCell key={cell.id}>
-                                          <Tag
-                                            type={isImage ? 'purple' : 'teal'}
-                                            size="sm"
-                                            renderIcon={isImage ? Image : Document}
-                                          >
-                                            {isImage ? 'One-Shot' : 'PDF path'}
-                                          </Tag>
-                                        </TableCell>
-                                      );
-                                    }
-                                    if (cell.info.header === 'status') {
-                                      const tagColor = STATUS_TAG_COLOR[cell.value] || 'gray';
-                                      return (
-                                        <TableCell key={cell.id}>
-                                          <Tag type={tagColor} size="sm">
-                                            {cell.value}
-                                          </Tag>
-                                        </TableCell>
-                                      );
-                                    }
-                                    if (cell.info.header === 'progress') {
-                                      return (
-                                        <TableCell key={cell.id} style={{ minWidth: '160px' }}>
-                                          <ProgressBar
-                                            label={stepProgress.label}
-                                            value={stepProgress.value}
-                                            max={1}
-                                            size="small"
-                                            hideLabel={false}
-                                          />
-                                        </TableCell>
-                                      );
-                                    }
-                                    if (cell.info.header === 'error') {
-                                      return (
-                                        <TableCell key={cell.id}>
-                                          {cell.value !== '—' ? (
-                                            <span style={{ color: 'var(--cds-support-error, #da1e28)', fontSize: '0.75rem', fontFamily: 'monospace' }}>
-                                              {cell.value}
-                                            </span>
-                                          ) : (
-                                            '—'
-                                          )}
-                                        </TableCell>
-                                      );
-                                    }
-                                    if (cell.info.header === 'actions') {
-                                      return (
-                                        <TableCell key={cell.id}>
-                                          <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                            {isReviewable && (
-                                              <Button
-                                                kind="primary"
+              return (
+                <TabPanel key={tIdx} style={{ padding: 0 }}>
+                  {error && (
+                    <div style={{ marginBottom: '1rem' }}>
+                      <InlineNotification
+                        kind="error"
+                        title="Error loading jobs."
+                        subtitle={error}
+                        onCloseButtonClick={() => tabSetters[tIdx]((s) => ({ ...s, error: null }))}
+                      />
+                    </div>
+                  )}
+                  {loading && tabJobs.length === 0 ? (
+                    <DataTableSkeleton headers={HEADERS} rowCount={5} />
+                  ) : (
+                    <DataTable rows={tabRows} headers={HEADERS}>
+                      {({
+                        rows,
+                        headers,
+                        getHeaderProps,
+                        getRowProps,
+                        getTableProps,
+                        getTableContainerProps,
+                        onInputChange,
+                      }) => (
+                        <TableContainer
+                          title={TAB_TITLES[tIdx]}
+                          description={TAB_DESCRIPTIONS[tIdx]}
+                          {...getTableContainerProps()}
+                        >
+                          <TableToolbar>
+                            <TableToolbarContent>
+                              <TableToolbarSearch onChange={onInputChange} placeholder="Search jobs…" />
+                            </TableToolbarContent>
+                          </TableToolbar>
+                          <Table {...getTableProps()}>
+                            <TableHead>
+                              <TableRow>
+                                {headers.map((header) => {
+                                  const headerProps = getHeaderProps({ header });
+                                  return (
+                                    <TableHeader {...headerProps} key={header.key}>
+                                      {header.header}
+                                    </TableHeader>
+                                  );
+                                })}
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {rows.length === 0 ? (
+                                <TableRow>
+                                  <TableCell colSpan={headers.length} style={{ textAlign: 'center', padding: '2rem', color: 'var(--cds-text-secondary)' }}>
+                                    No jobs found.
+                                  </TableCell>
+                                </TableRow>
+                              ) : (
+                                rows.map((row) => {
+                                  const job = tabJobs.find((j) => j.job_id === row.id);
+                                  const stepProgress = getStepProgress(row.cells.find((c) => c.info.header === 'status')?.value || '');
+                                  const isReviewable = job?.status?.toLowerCase() === 'review';
+                                  const rowProps = getRowProps({ row });
+                                  return (
+                                    <TableRow {...rowProps} key={row.id}>
+                                      {row.cells.map((cell) => {
+                                        if (cell.info.header === 'pipeline_path') {
+                                          const val: string | null = cell.value;
+                                          if (!val) {
+                                            return <TableCell key={cell.id}>—</TableCell>;
+                                          }
+                                          const isImage = val === 'oneshot';
+                                          return (
+                                            <TableCell key={cell.id}>
+                                              <Tag
+                                                type={isImage ? 'purple' : 'teal'}
                                                 size="sm"
+                                                renderIcon={isImage ? Image : Document}
+                                              >
+                                                {isImage ? 'One-Shot' : 'PDF path'}
+                                              </Tag>
+                                            </TableCell>
+                                          );
+                                        }
+                                        if (cell.info.header === 'status') {
+                                          const tagColor = STATUS_TAG_COLOR[cell.value] || 'gray';
+                                          return (
+                                            <TableCell key={cell.id}>
+                                              <Tag type={tagColor} size="sm">
+                                                {cell.value}
+                                              </Tag>
+                                            </TableCell>
+                                          );
+                                        }
+                                        if (cell.info.header === 'progress') {
+                                          return (
+                                            <TableCell key={cell.id} style={{ minWidth: '160px' }}>
+                                              <ProgressBar
+                                                label={stepProgress.label}
+                                                value={stepProgress.value}
+                                                max={1}
+                                                size="small"
+                                                hideLabel={false}
+                                              />
+                                            </TableCell>
+                                          );
+                                        }
+                                        if (cell.info.header === 'error') {
+                                          return (
+                                            <TableCell key={cell.id}>
+                                              {cell.value !== '—' ? (
+                                                <span style={{ color: 'var(--cds-support-error, #da1e28)', fontSize: '0.75rem', fontFamily: 'monospace' }}>
+                                                  {cell.value}
+                                                </span>
+                                              ) : (
+                                                '—'
+                                              )}
+                                            </TableCell>
+                                          );
+                                        }
+                                        if (cell.info.header === 'actions') {
+                                          return (
+                                            <TableCell key={cell.id}>
+                                              <Button
+                                                kind={isReviewable ? 'primary' : 'ghost'}
+                                                size="sm"
+                                                renderIcon={isReviewable ? undefined : DocumentView}
+                                                iconDescription="View Details"
+                                                hasIconOnly={!isReviewable}
                                                 onClick={() => navigate(`/review/${row.id}`)}
                                               >
-                                                Review
+                                                {isReviewable ? 'Review' : undefined}
                                               </Button>
-                                            )}
-                                            <Button
-                                              kind="ghost"
-                                              size="sm"
-                                              hasIconOnly
-                                              renderIcon={DocumentView}
-                                              iconDescription="View Job Details"
-                                              onClick={() => navigate(`/jobs/${row.id}`)}
-                                            />
-                                          </div>
-                                        </TableCell>
-                                      );
-                                    }
-                                    return <TableCell key={cell.id}>{cell.value}</TableCell>;
-                                  })}
-                                </TableRow>
-                              );
-                            })
-                          )}
-                        </TableBody>
-                      </Table>
-                    </TableContainer>
+                                            </TableCell>
+                                          );
+                                        }
+                                        return <TableCell key={cell.id}>{cell.value}</TableCell>;
+                                      })}
+                                    </TableRow>
+                                  );
+                                })
+                              )}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      )}
+                    </DataTable>
                   )}
-                </DataTable>
-              )}
 
-              {totalItems > 0 && (
-                <Pagination
-                  page={page}
-                  pageSize={pageSize}
-                  pageSizes={[10, 20, 50]}
-                  totalItems={totalItems}
-                  onChange={({ page: newPage, pageSize: newPageSize }) => {
-                    setPage(newPage);
-                    setPageSize(newPageSize);
-                  }}
-                />
-              )}
-            </TabPanel>
-
-            <TabPanel style={{ padding: 0 }} />
-            <TabPanel style={{ padding: 0 }} />
+                  {totalItems > 0 && (
+                    <Pagination
+                      page={page}
+                      pageSize={pageSize}
+                      pageSizes={[10, 20, 50]}
+                      totalItems={totalItems}
+                      onChange={({ page: newPage, pageSize: newPageSize }) => {
+                        tabSetters[tIdx]((s) => ({ ...s, page: newPage, pageSize: newPageSize }));
+                      }}
+                    />
+                  )}
+                </TabPanel>
+              );
+            })}
           </TabPanels>
         </Tabs>
       </Column>

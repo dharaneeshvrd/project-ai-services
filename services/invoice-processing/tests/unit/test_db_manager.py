@@ -180,3 +180,50 @@ class TestListJobs:
 
         assert rows == []
         assert total == 0
+
+
+# ---------------------------------------------------------------------------
+# delete_job
+# ---------------------------------------------------------------------------
+
+class TestDeleteJob:
+    def test_deletes_existing_job(self):
+        job = _make_job()
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.get.return_value = job
+
+        with patch("db.manager.get_db_session", return_value=mock_session):
+            result = DatabaseManager.delete_job("job-1")
+
+        assert result is True
+        mock_session.delete.assert_called_once_with(job)
+        mock_session.flush.assert_called_once()
+
+    def test_returns_false_when_missing(self):
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.get.return_value = None
+
+        with patch("db.manager.get_db_session", return_value=mock_session):
+            result = DatabaseManager.delete_job("non-existent")
+
+        assert result is False
+        mock_session.delete.assert_not_called()
+
+    def test_returns_false_on_db_error(self):
+        from sqlalchemy.exc import SQLAlchemyError
+
+        job = _make_job()
+        mock_session = MagicMock()
+        mock_session.__enter__ = MagicMock(return_value=mock_session)
+        mock_session.__exit__ = MagicMock(return_value=False)
+        mock_session.get.return_value = job
+        mock_session.flush.side_effect = SQLAlchemyError("db fail")
+
+        with patch("db.manager.get_db_session", return_value=mock_session):
+            result = DatabaseManager.delete_job("job-1")
+
+        assert result is False

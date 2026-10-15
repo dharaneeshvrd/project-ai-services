@@ -244,11 +244,11 @@ class TestRunPipelineRouting:
 
         staged = self._make_staged_path(tmp_path, "scan.png")
 
-        with patch("api.v1.invoices.db_manager") as mock_mgr, \
-             patch("api.v1.invoices.run_oneshot_path", new_callable=AsyncMock) as mock_oneshot, \
-             patch("api.v1.invoices.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
-             patch("api.v1.invoices.ExtractClient") as mock_extract_cls, \
-             caplog.at_level(logging.INFO, logger="api.v1.invoices"):
+        with patch("pipeline.orchestrator.db_manager") as mock_mgr, \
+             patch("pipeline.orchestrator.run_oneshot_path", new_callable=AsyncMock) as mock_oneshot, \
+             patch("pipeline.orchestrator.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
+             patch("pipeline.orchestrator.ExtractClient") as mock_extract_cls, \
+             caplog.at_level(logging.INFO, logger="pipeline.orchestrator"):
 
             mock_oneshot.return_value = {}
             asyncio.run(_run_pipeline("job-img-1", staged, "image"))
@@ -269,11 +269,11 @@ class TestRunPipelineRouting:
 
         staged = self._make_staged_path(tmp_path, "invoice.pdf")
 
-        with patch("api.v1.invoices.db_manager") as mock_mgr, \
-             patch("api.v1.invoices.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
-             patch("api.v1.invoices.run_oneshot_path", new_callable=AsyncMock) as mock_oneshot, \
-             patch("api.v1.invoices.DigitizeClient") as mock_digitize_cls, \
-             caplog.at_level(logging.INFO, logger="api.v1.invoices"):
+        with patch("pipeline.orchestrator.db_manager") as mock_mgr, \
+             patch("pipeline.orchestrator.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
+             patch("pipeline.orchestrator.run_oneshot_path", new_callable=AsyncMock) as mock_oneshot, \
+             patch("pipeline.orchestrator.DigitizeClient") as mock_digitize_cls, \
+             caplog.at_level(logging.INFO, logger="pipeline.orchestrator"):
 
             mock_pdf.return_value = {}
             asyncio.run(_run_pipeline("job-pdf-1", staged, "pdf"))
@@ -294,10 +294,10 @@ class TestRunPipelineRouting:
 
         staged = self._make_staged_path(tmp_path, "doc.pdf")
 
-        with patch("api.v1.invoices.db_manager"), \
-             patch("api.v1.invoices.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
-             patch("api.v1.invoices.DigitizeClient"), \
-             caplog.at_level(logging.DEBUG, logger="api.v1.invoices"):
+        with patch("pipeline.orchestrator.db_manager"), \
+             patch("pipeline.orchestrator.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
+             patch("pipeline.orchestrator.DigitizeClient"), \
+             caplog.at_level(logging.DEBUG, logger="pipeline.orchestrator"):
 
             mock_pdf.return_value = {}
             asyncio.run(_run_pipeline("job-log-1", staged, "pdf"))
@@ -317,9 +317,9 @@ class TestRunPipelineRouting:
             call_order.append("oneshot")
             return {}
 
-        with patch("api.v1.invoices.db_manager") as mock_mgr, \
-             patch("api.v1.invoices.run_oneshot_path", side_effect=fake_oneshot), \
-             patch("api.v1.invoices.ExtractClient"):
+        with patch("pipeline.orchestrator.db_manager") as mock_mgr, \
+             patch("pipeline.orchestrator.run_oneshot_path", side_effect=fake_oneshot), \
+             patch("pipeline.orchestrator.ExtractClient"):
 
             mock_mgr.update_job.side_effect = lambda **kw: call_order.append(
                 ("update_job", kw.get("status"))
@@ -337,9 +337,9 @@ class TestRunPipelineRouting:
 
         staged = self._make_staged_path(tmp_path, "bad.pdf")
 
-        with patch("api.v1.invoices.db_manager") as mock_mgr, \
-             patch("api.v1.invoices.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
-             patch("api.v1.invoices.DigitizeClient"):
+        with patch("pipeline.orchestrator.db_manager") as mock_mgr, \
+             patch("pipeline.orchestrator.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
+             patch("pipeline.orchestrator.DigitizeClient"):
 
             mock_pdf.side_effect = RuntimeError("digitize down")
             asyncio.run(_run_pipeline("job-fail-1", staged, "pdf"))
@@ -353,24 +353,223 @@ class TestRunPipelineRouting:
 
 
 # ---------------------------------------------------------------------------
-# Stub endpoints (approve / reject) still return 501
+# GET /v1/invoices/{job_id}/file
 # ---------------------------------------------------------------------------
 
-def test_approve_stub_returns_501(client):
-    resp = client.post("/v1/invoices/some-job/approve")
-    assert resp.status_code == 501
+class TestGetInvoiceFile:
+    def test_file_download_success(self, client, tmp_path):
+        from settings import InvoiceProcessingConfig
+
+        job_dir = tmp_path / "staging" / "job-file-1"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        sample_file = job_dir / "invoice.pdf"
+        sample_file.write_bytes(b"%PDF-1.4 test invoice file")
+
+        job = _fake_job(job_id="job-file-1", filename="invoice.pdf", status="review")
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr, \
+             patch.object(InvoiceProcessingConfig, "staging_dir", new_callable=PropertyMock, return_value=tmp_path / "staging"):
+            mock_mgr.get_job.return_value = job
+
+            resp = client.get("/v1/invoices/job-file-1/file")
+
+        assert resp.status_code == 200
+        assert resp.content == b"%PDF-1.4 test invoice file"
+
+    def test_file_download_job_not_found(self, client):
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = None
+
+            resp = client.get("/v1/invoices/missing-job/file")
+
+        assert resp.status_code == 404
+
+    def test_file_download_file_missing_on_disk(self, client, tmp_path):
+        from settings import InvoiceProcessingConfig
+
+        job = _fake_job(job_id="job-file-2", filename="missing.pdf", status="review")
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr, \
+             patch.object(InvoiceProcessingConfig, "staging_dir", new_callable=PropertyMock, return_value=tmp_path / "staging"):
+            mock_mgr.get_job.return_value = job
+
+            resp = client.get("/v1/invoices/job-file-2/file")
+
+        assert resp.status_code == 404
 
 
-def test_reject_stub_returns_501(client):
-    resp = client.post("/v1/invoices/some-job/reject")
-    assert resp.status_code == 501
+# ---------------------------------------------------------------------------
+# PATCH /v1/invoices/{job_id}
+# ---------------------------------------------------------------------------
+
+class TestUpdateInvoiceJob:
+    def test_update_during_review_updates_and_returns_200(self, client):
+        job = _fake_job(job_id="job-patch-1", status="review")
+        updated_job = _fake_job(job_id="job-patch-1", status="review")
+        updated_job.staged_header = {"INVOICE_NUM": "INV-CORRECTED"}
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = job
+            mock_mgr.update_job.return_value = updated_job
+
+            resp = client.patch(
+                "/v1/invoices/job-patch-1",
+                json={"staged_header": {"INVOICE_NUM": "INV-CORRECTED"}},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["staged_header"] == {"INVOICE_NUM": "INV-CORRECTED"}
+        mock_mgr.update_job.assert_called_once_with(
+            job_id="job-patch-1",
+            staged_header={"INVOICE_NUM": "INV-CORRECTED"},
+        )
+
+    def test_update_when_job_not_found_returns_404(self, client):
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = None
+
+            resp = client.patch(
+                "/v1/invoices/missing-job",
+                json={"staged_header": {"INVOICE_NUM": "INV-001"}},
+            )
+
+        assert resp.status_code == 404
+
+    @pytest.mark.parametrize("invalid_status", ["accepted", "extracting", "approved", "rejected", "failed"])
+    def test_update_when_status_not_review_returns_409(self, client, invalid_status):
+        job = _fake_job(job_id="job-not-review", status=invalid_status)
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = job
+
+            resp = client.patch(
+                "/v1/invoices/job-not-review",
+                json={"staged_header": {"INVOICE_NUM": "INV-001"}},
+            )
+
+        assert resp.status_code == 409
 
 
-def test_update_stub_returns_501(client):
-    resp = client.patch("/v1/invoices/some-job", json={})
-    assert resp.status_code == 501
+# ---------------------------------------------------------------------------
+# POST /v1/invoices/{job_id}/approve
+# ---------------------------------------------------------------------------
+
+class TestApproveInvoiceJob:
+    def test_approve_review_job_sets_approved_and_returns_200(self, client):
+        job = _fake_job(job_id="job-app-1", status="review")
+        approved_job = _fake_job(job_id="job-app-1", status="approved")
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = job
+            mock_mgr.update_job.return_value = approved_job
+
+            resp = client.post("/v1/invoices/job-app-1/approve")
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "approved"
+        mock_mgr.update_job.assert_called_once_with(job_id="job-app-1", status="approved")
+
+    def test_approve_unknown_job_returns_404(self, client):
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = None
+
+            resp = client.post("/v1/invoices/missing-job/approve")
+
+        assert resp.status_code == 404
+
+    @pytest.mark.parametrize("invalid_status", ["accepted", "extracting", "approved", "rejected", "failed"])
+    def test_approve_non_review_job_returns_409(self, client, invalid_status):
+        job = _fake_job(job_id="job-invalid", status=invalid_status)
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = job
+
+            resp = client.post("/v1/invoices/job-invalid/approve")
+
+        assert resp.status_code == 409
 
 
-def test_delete_stub_returns_501(client):
-    resp = client.delete("/v1/invoices/some-job")
-    assert resp.status_code == 501
+# ---------------------------------------------------------------------------
+# POST /v1/invoices/{job_id}/reject
+# ---------------------------------------------------------------------------
+
+class TestRejectInvoiceJob:
+    def test_reject_review_job_sets_rejected_and_returns_200(self, client):
+        job = _fake_job(job_id="job-rej-1", status="review")
+        rejected_job = _fake_job(job_id="job-rej-1", status="rejected")
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = job
+            mock_mgr.update_job.return_value = rejected_job
+
+            resp = client.post("/v1/invoices/job-rej-1/reject")
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "rejected"
+        mock_mgr.update_job.assert_called_once_with(job_id="job-rej-1", status="rejected")
+
+    def test_reject_unknown_job_returns_404(self, client):
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = None
+
+            resp = client.post("/v1/invoices/missing-job/reject")
+
+        assert resp.status_code == 404
+
+    @pytest.mark.parametrize("invalid_status", ["accepted", "extracting", "approved", "rejected", "failed"])
+    def test_reject_non_review_job_returns_409(self, client, invalid_status):
+        job = _fake_job(job_id="job-invalid", status=invalid_status)
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = job
+
+            resp = client.post("/v1/invoices/job-invalid/reject")
+
+        assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# DELETE /v1/invoices/{job_id}
+# ---------------------------------------------------------------------------
+
+class TestDeleteInvoiceJob:
+    @pytest.mark.parametrize("deletable_status", ["review", "approved", "rejected", "failed"])
+    def test_delete_deletable_status_returns_204_and_cleans_dir(self, client, tmp_path, deletable_status):
+        from settings import InvoiceProcessingConfig
+
+        job_dir = tmp_path / "staging" / "job-del-1"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "invoice.pdf").write_bytes(b"%PDF dummy")
+
+        job = _fake_job(job_id="job-del-1", status=deletable_status)
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr, \
+             patch.object(InvoiceProcessingConfig, "staging_dir", new_callable=PropertyMock, return_value=tmp_path / "staging"):
+            mock_mgr.get_job.return_value = job
+            mock_mgr.delete_job.return_value = True
+
+            resp = client.delete("/v1/invoices/job-del-1")
+
+        assert resp.status_code == 204
+        mock_mgr.delete_job.assert_called_once_with("job-del-1")
+        assert not job_dir.exists()
+
+    @pytest.mark.parametrize("in_flight_status", ["accepted", "extracting"])
+    def test_delete_in_flight_status_returns_409(self, client, in_flight_status):
+        job = _fake_job(job_id="job-inflight", status=in_flight_status)
+
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = job
+
+            resp = client.delete("/v1/invoices/job-inflight")
+
+        assert resp.status_code == 409
+        mock_mgr.delete_job.assert_not_called()
+
+    def test_delete_unknown_job_returns_404(self, client):
+        with patch("api.v1.invoices.db_manager") as mock_mgr:
+            mock_mgr.get_job.return_value = None
+
+            resp = client.delete("/v1/invoices/missing-job")
+
+        assert resp.status_code == 404

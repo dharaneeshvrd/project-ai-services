@@ -10,41 +10,68 @@ from pathlib import Path
 
 from common.misc_utils import get_logger
 
+from clients.digitize_client import DigitizeClient
+from clients.extract_client import ExtractClient
+from db.manager import db_manager
 from pipeline.assembler import assemble_invoice
 from pipeline.oneshot_path import run_oneshot_path
 from pipeline.pdf_path import run_pdf_path
+from settings import settings
 
 logger = get_logger("pipeline.orchestrator")
 
 
-async def _run_pipeline(job_id: str, staged_path: Path, input_type: str) -> dict:
+async def _run_pipeline(job_id: str, staged_path: Path, input_type: str) -> None:
+    """Background pipeline task — dispatches to pdf_path or oneshot_path.
+
+    The job moves ``accepted`` → ``extracting`` as soon as it is picked up and
+    stays ``extracting`` through digitize, extract and ``assemble_invoice``;
+    it then moves directly to ``review``.
+
+    Routing decision:
+    - ``"image"`` → One-Shot path: forward directly to extract VLM endpoint.
+    - ``"pdf"``   → PDF path: forward to digitize as-is; digitize owns
+                    internal type detection.
     """
-    Orchestrate the full invoice processing pipeline for *job_id*.
+    try:
+        db_manager.update_job(job_id=job_id, status="extracting")
 
-    Parameters
-    ----------
-    job_id:       Unique identifier for this processing job.
-    staged_path:  Filesystem path to the uploaded invoice file.
-    input_type:   ``"pdf"`` or ``"image"`` as returned by
-                  :func:`pipeline.router.detect_input_type`.
+        if input_type == "image":
+            logger.info(
+                f"[{job_id}] Routing decision: image → One-Shot path (extract VLM)"
+            )
+            extract_client = ExtractClient(base_url=settings.invoice.extract_url)
+            raw = await run_oneshot_path(
+                job_id=job_id,
+                staged_path=staged_path,
+                extract_client=extract_client,
+            )
+        elif input_type == "pdf":
+            logger.info(
+                f"[{job_id}] Routing decision: pdf → PDF path (digitize)"
+            )
+            digitize_client = DigitizeClient(base_url=settings.invoice.digitize_url)
+            raw = await run_pdf_path(
+                job_id=job_id,
+                staged_path=staged_path,
+                digitize_client=digitize_client,
+            )
+        else:
+            raise ValueError(f"Unknown input_type {input_type!r} for job {job_id}")
 
-    Returns
-    -------
-    dict
-        Assembled invoice payload with ``staged_header`` and
-        ``staged_lines`` ready for downstream DB load.
-    """
-    logger.info("Starting pipeline job_id=%s input_type=%s path=%s", job_id, input_type, staged_path)
+        header, lines = assemble_invoice(raw=raw, job_id=job_id, filename=staged_path.name)
 
-    if input_type == "pdf":
-        # pdf -> digitize -> md -> extract
-        raw = await run_pdf_path(job_id=job_id, staged_path=staged_path)
-    elif input_type == "image":
-        # image -> one-shot VLM extract
-        raw = await run_oneshot_path(job_id=job_id, staged_path=staged_path)
-    else:
-        raise ValueError(f"Unknown input_type '{input_type}' for job {job_id}")
+        # Persist structured JSON exclusively to PostgreSQL DB (JSONB fields)
+        db_manager.update_job(
+            job_id=job_id,
+            status="review",
+            staged_header=header,
+            staged_lines=lines,
+        )
+        logger.info(
+            f"Job {job_id!r} completed assembly, stored in DB, waiting for human review"
+        )
 
-    result = assemble_invoice(job_id=job_id, raw=raw)
-    logger.info("Pipeline complete job_id=%s", job_id)
-    return result
+    except Exception as exc:
+        logger.error(f"Pipeline failed for job {job_id!r}: {exc}", exc_info=True)
+        db_manager.update_job(job_id=job_id, status="failed", error=str(exc))
