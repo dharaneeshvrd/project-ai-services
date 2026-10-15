@@ -43,6 +43,7 @@ class DatabaseManager:
                 )
                 session.add(job)
                 session.flush()
+                session.expunge(job)
                 return job
         except IntegrityError:
             logger.error(f"Invoice job {job_id!r} already exists")
@@ -90,6 +91,7 @@ class DatabaseManager:
                     if job.completed_at is None:
                         job.completed_at = datetime.now(timezone.utc)
                 session.flush()
+                session.expunge(job)
                 return job
         except SQLAlchemyError as exc:
             logger.error(f"DB error updating job {job_id!r}: {exc}", exc_info=True)
