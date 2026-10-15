@@ -244,11 +244,11 @@ class TestRunPipelineRouting:
 
         staged = self._make_staged_path(tmp_path, "scan.png")
 
-        with patch("api.v1.invoices.db_manager") as mock_mgr, \
-             patch("api.v1.invoices.run_oneshot_path", new_callable=AsyncMock) as mock_oneshot, \
-             patch("api.v1.invoices.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
-             patch("api.v1.invoices.ExtractClient") as mock_extract_cls, \
-             caplog.at_level(logging.INFO, logger="api.v1.invoices"):
+        with patch("pipeline.orchestrator.db_manager") as mock_mgr, \
+             patch("pipeline.orchestrator.run_oneshot_path", new_callable=AsyncMock) as mock_oneshot, \
+             patch("pipeline.orchestrator.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
+             patch("pipeline.orchestrator.ExtractClient") as mock_extract_cls, \
+             caplog.at_level(logging.INFO, logger="pipeline.orchestrator"):
 
             mock_oneshot.return_value = {}
             asyncio.run(_run_pipeline("job-img-1", staged, "image"))
@@ -269,11 +269,11 @@ class TestRunPipelineRouting:
 
         staged = self._make_staged_path(tmp_path, "invoice.pdf")
 
-        with patch("api.v1.invoices.db_manager") as mock_mgr, \
-             patch("api.v1.invoices.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
-             patch("api.v1.invoices.run_oneshot_path", new_callable=AsyncMock) as mock_oneshot, \
-             patch("api.v1.invoices.DigitizeClient") as mock_digitize_cls, \
-             caplog.at_level(logging.INFO, logger="api.v1.invoices"):
+        with patch("pipeline.orchestrator.db_manager") as mock_mgr, \
+             patch("pipeline.orchestrator.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
+             patch("pipeline.orchestrator.run_oneshot_path", new_callable=AsyncMock) as mock_oneshot, \
+             patch("pipeline.orchestrator.DigitizeClient") as mock_digitize_cls, \
+             caplog.at_level(logging.INFO, logger="pipeline.orchestrator"):
 
             mock_pdf.return_value = {}
             asyncio.run(_run_pipeline("job-pdf-1", staged, "pdf"))
@@ -294,10 +294,10 @@ class TestRunPipelineRouting:
 
         staged = self._make_staged_path(tmp_path, "doc.pdf")
 
-        with patch("api.v1.invoices.db_manager"), \
-             patch("api.v1.invoices.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
-             patch("api.v1.invoices.DigitizeClient"), \
-             caplog.at_level(logging.DEBUG, logger="api.v1.invoices"):
+        with patch("pipeline.orchestrator.db_manager"), \
+             patch("pipeline.orchestrator.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
+             patch("pipeline.orchestrator.DigitizeClient"), \
+             caplog.at_level(logging.DEBUG, logger="pipeline.orchestrator"):
 
             mock_pdf.return_value = {}
             asyncio.run(_run_pipeline("job-log-1", staged, "pdf"))
@@ -317,9 +317,9 @@ class TestRunPipelineRouting:
             call_order.append("oneshot")
             return {}
 
-        with patch("api.v1.invoices.db_manager") as mock_mgr, \
-             patch("api.v1.invoices.run_oneshot_path", side_effect=fake_oneshot), \
-             patch("api.v1.invoices.ExtractClient"):
+        with patch("pipeline.orchestrator.db_manager") as mock_mgr, \
+             patch("pipeline.orchestrator.run_oneshot_path", side_effect=fake_oneshot), \
+             patch("pipeline.orchestrator.ExtractClient"):
 
             mock_mgr.update_job.side_effect = lambda **kw: call_order.append(
                 ("update_job", kw.get("status"))
@@ -337,9 +337,9 @@ class TestRunPipelineRouting:
 
         staged = self._make_staged_path(tmp_path, "bad.pdf")
 
-        with patch("api.v1.invoices.db_manager") as mock_mgr, \
-             patch("api.v1.invoices.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
-             patch("api.v1.invoices.DigitizeClient"):
+        with patch("pipeline.orchestrator.db_manager") as mock_mgr, \
+             patch("pipeline.orchestrator.run_pdf_path", new_callable=AsyncMock) as mock_pdf, \
+             patch("pipeline.orchestrator.DigitizeClient"):
 
             mock_pdf.side_effect = RuntimeError("digitize down")
             asyncio.run(_run_pipeline("job-fail-1", staged, "pdf"))
