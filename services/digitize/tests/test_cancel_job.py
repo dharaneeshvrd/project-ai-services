@@ -64,6 +64,8 @@ from fastapi.testclient import TestClient
 # ---------------------------------------------------------------------------
 for _pkg in [
     "docling",
+    "docling.backend",
+    "docling.backend.docling_parse_backend",
     "docling.datamodel",
     "docling.datamodel.document",
     "docling.document_converter",
@@ -77,6 +79,7 @@ for _pkg in [
         sys.modules[_pkg] = _mod
 
 for _attr, _name in [
+    ("docling.backend.docling_parse_backend", "DoclingParseDocumentBackend"),
     ("docling.datamodel.document", "ConversionResult"),
     ("docling.document_converter", "DocumentConverter"),
     ("docling_core.types.doc.document", "DoclingDocument"),

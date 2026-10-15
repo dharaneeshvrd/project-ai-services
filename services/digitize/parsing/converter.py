@@ -258,6 +258,7 @@ def get_doc_converter(ocr_doc=False):
     """
     import os
     from pathlib import Path
+    from docling.backend.docling_parse_backend import DoclingParseDocumentBackend
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -300,7 +301,12 @@ def get_doc_converter(ocr_doc=False):
             InputFormat.PDF,
             InputFormat.DOCX
         ],
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=pipeline_options,
+                backend=DoclingParseDocumentBackend,
+            )
+        },
     )
 
     return doc_converter
