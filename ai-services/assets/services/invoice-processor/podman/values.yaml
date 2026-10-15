@@ -1,10 +1,10 @@
 invoiceProcessing:
-  image: icr.io/ai-services-cicd/invoice-processing-service:v0.0.1
+  image: icr.io/ai-services-private/invoice-processing-service:v0.0.1te-demo
   log_level: "INFO"
   database: "invoice_processing_metadata"
 
 invoiceProcessingUi:
-  image: icr.io/ai-services-cicd/invoice-processing-ui:v0.0.1
+  image: icr.io/ai-services-private/invoice-processing-ui:v0.0.1te-demo
 
 postgres:
   image: icr.io/ai-services-cicd/postgres:18-6
