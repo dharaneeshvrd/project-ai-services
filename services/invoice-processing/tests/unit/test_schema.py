@@ -18,7 +18,13 @@ EXPECTED_REQUIRED = {
     "VENDOR_NAME",
     "INVOICE_AMOUNT",
     "INVOICE_CURRENCY_CODE",
+    "SELLER",
+    "SELLER_ADDRESS",
+    "CLIENT",
+    "CLIENT_ADDRESS",
 }
+
+LINE_SCHEMA = JSON_SCHEMA["properties"]["AP_INVOICE_LINES_ALL"]["items"]
 
 
 def test_root_required_lists_both_sections():
@@ -34,6 +40,26 @@ def test_header_has_no_nested_required_array():
     """A ``required`` array on a property-level object would be dropped by extract."""
     header = JSON_SCHEMA["properties"]["AP_INVOICES_ALL"]
     assert "required" not in header
+
+
+def test_line_item_required_fields():
+    assert set(LINE_SCHEMA["required"]) == {
+        "LINE_NUMBER",
+        "AMOUNT",
+        "DESCRIPTION",
+        "QUANTITY_INVOICED",
+        "UNIT_PRICE",
+    }
+
+
+def test_required_line_fields_remain_nullable():
+    for name in ("DESCRIPTION", "QUANTITY_INVOICED", "UNIT_PRICE"):
+        assert "null" in LINE_SCHEMA["properties"][name]["type"], name
+
+
+def test_custom_prompt_present_and_within_limit():
+    prompt = INVOICE_SCHEMA_PAYLOAD["custom_prompt"]
+    assert prompt and len(prompt) <= 2000
 
 
 def test_no_property_uses_non_boolean_required():
