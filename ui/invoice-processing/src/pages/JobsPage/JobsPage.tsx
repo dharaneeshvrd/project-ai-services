@@ -392,25 +392,16 @@ const JobsPage: React.FC = () => {
                                         if (cell.info.header === 'actions') {
                                           return (
                                             <TableCell key={cell.id}>
-                                              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                                {isReviewable && (
-                                                  <Button
-                                                    kind="primary"
-                                                    size="sm"
-                                                    onClick={() => navigate(`/review/${row.id}`)}
-                                                  >
-                                                    Review
-                                                  </Button>
-                                                )}
-                                                <Button
-                                                  kind="ghost"
-                                                  size="sm"
-                                                  hasIconOnly
-                                                  renderIcon={DocumentView}
-                                                  iconDescription="View Job Details"
-                                                  onClick={() => navigate(`/jobs/${row.id}`)}
-                                                />
-                                              </div>
+                                              <Button
+                                                kind={isReviewable ? 'primary' : 'ghost'}
+                                                size="sm"
+                                                renderIcon={isReviewable ? undefined : DocumentView}
+                                                iconDescription="View Details"
+                                                hasIconOnly={!isReviewable}
+                                                onClick={() => navigate(`/review/${row.id}`)}
+                                              >
+                                                {isReviewable ? 'Review' : undefined}
+                                              </Button>
                                             </TableCell>
                                           );
                                         }

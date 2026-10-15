@@ -69,12 +69,29 @@ export const listJobs = async (params?: ListJobsParams): Promise<InvoiceJobsResp
   return response.data;
 };
 
-export const approveJob = async (jobId: string): Promise<void> => {
-  await apiClient.post(`/invoices/${jobId}/approve`);
+export const updateJob = async (
+  jobId: string,
+  body: { staged_header?: Record<string, unknown>; staged_lines?: Record<string, unknown>[] }
+): Promise<InvoiceJob> => {
+  const response = await apiClient.patch<InvoiceJob>(`/invoices/${jobId}`, body);
+  return response.data;
 };
 
-export const rejectJob = async (jobId: string): Promise<void> => {
-  await apiClient.post(`/invoices/${jobId}/reject`);
+export const approveJob = async (jobId: string): Promise<InvoiceJob> => {
+  const response = await apiClient.post<InvoiceJob>(`/invoices/${jobId}/approve`);
+  return response.data;
+};
+
+export const rejectJob = async (jobId: string): Promise<InvoiceJob> => {
+  const response = await apiClient.post<InvoiceJob>(`/invoices/${jobId}/reject`);
+  return response.data;
+};
+
+/** Fetch the invoice file as a Blob so <img>/<iframe> can render it.
+ *  Caller must call URL.revokeObjectURL() when done. */
+export const fetchInvoiceBlob = async (jobId: string): Promise<string> => {
+  const response = await apiClient.get<Blob>(`/invoices/${jobId}/file`, { responseType: 'blob' });
+  return URL.createObjectURL(response.data);
 };
 
 export default apiClient;

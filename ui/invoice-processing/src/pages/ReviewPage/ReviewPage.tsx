@@ -1,29 +1,83 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useId } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import {
-  Grid,
-  Column,
   Breadcrumb,
   BreadcrumbItem,
   Button,
+  Column,
+  Grid,
+  InlineLoading,
   InlineNotification,
-  SkeletonText,
-  Tag,
+  Layer,
+  Modal,
+  ProgressIndicator,
+  ProgressStep,
+  Stack,
   Table,
-  TableHead,
-  TableHeader,
   TableBody,
-  TableRow,
   TableCell,
   TableContainer,
+  TableHead,
+  TableHeader,
+  TableRow,
+  Tag,
+  TextArea,
+  TextInput,
   Tile,
-  InlineLoading,
-  Modal,
-  Section,
-  Heading,
 } from '@carbon/react';
-import { CheckmarkFilled, CloseFilled, ArrowLeft } from '@carbon/icons-react';
-import { getJob, approveJob, rejectJob, InvoiceJob } from '../../services/api';
+import {
+  Checkmark,
+  Close,
+  ChevronDown,
+  ChevronUp,
+  ZoomIn,
+  ZoomOut,
+  Reset,
+  Download,
+  ArrowLeft,
+} from '@carbon/icons-react';
+import {
+  getJob,
+  updateJob,
+  approveJob,
+  rejectJob,
+  fetchInvoiceBlob,
+  InvoiceJob,
+} from '../../services/api';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const PIPELINE_STEPS = ['Accepted', 'Extracting', 'Review', 'Approved'];
+
+const STEP_INDEX: Record<string, number> = {
+  accepted: 0,
+  extracting: 1,
+  review: 2,
+  approved: 3,
+  rejected: 2,
+  failed: 1,
+};
+
+// Fields the reviewer may edit inline when the job is in review status
+const EDITABLE_HEADER_KEYS = new Set([
+  'invoice_number', 'invoice_date', 'due_date', 'vendor_name',
+  'vendor_address', 'bill_to_name', 'bill_to_address',
+  'subtotal', 'tax', 'total', 'currency',
+  'payment_terms', 'po_number', 'notes',
+]);
+
+// Columns shown in the lines table
+const LINE_COLS: { key: string; label: string }[] = [
+  { key: 'line_number',  label: '#'           },
+  { key: 'description', label: 'Description'  },
+  { key: 'quantity',    label: 'Qty'          },
+  { key: 'unit_price',  label: 'Unit Price'   },
+  { key: 'amount',      label: 'Amount'       },
+  { key: 'tax_code',    label: 'Tax Code'     },
+  { key: 'po_number',   label: 'PO #'         },
+];
 
 const HEADER_LABEL: Record<string, string> = {
   invoice_number: 'Invoice Number',
@@ -42,37 +96,131 @@ const HEADER_LABEL: Record<string, string> = {
   notes: 'Notes',
 };
 
-function formatFieldValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '—';
-  return String(value);
+const ZOOM_STEP = 25;
+const ZOOM_MIN  = 50;
+const ZOOM_MAX  = 300;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function fmt(val: unknown): React.ReactNode {
+  if (val === null || val === undefined || val === '') {
+    return <span style={{ color: 'var(--cds-text-placeholder)' }}>—</span>;
+  }
+  return String(val);
 }
 
+// ---------------------------------------------------------------------------
+// EditableCell — click-to-edit, saves on blur or Enter
+// ---------------------------------------------------------------------------
+interface EditableCellProps {
+  value: unknown;
+  onSave: (v: string) => void;
+  disabled: boolean;
+}
+
+function EditableCell({ value, onSave, disabled }: EditableCellProps) {
+  const [editing, setEditing] = useState(false);
+  const [draft,   setDraft]   = useState(String(value ?? ''));
+  const inputRef              = useRef<HTMLInputElement>(null);
+  const inputId               = useId();
+
+  function startEdit() {
+    if (disabled) return;
+    // Always sync draft from latest prop value when starting an edit
+    setDraft(String(value ?? ''));
+    setEditing(true);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
+
+  function commit() {
+    setEditing(false);
+    const trimmed = draft.trim();
+    if (trimmed !== String(value ?? '').trim()) onSave(trimmed);
+  }
+
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key === 'Enter')  { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { setEditing(false); setDraft(String(value ?? '')); }
+  }
+
+  if (editing) {
+    return (
+      <TextInput
+        ref={inputRef}
+        id={inputId}
+        labelText=""
+        hideLabel
+        size="sm"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={onKeyDown}
+        style={{ minWidth: '6rem' }}
+      />
+    );
+  }
+
+  return (
+    <span
+      onClick={startEdit}
+      title={disabled ? undefined : 'Click to edit'}
+      style={{
+        display: 'inline-block',
+        minWidth: '4rem',
+        cursor: disabled ? 'default' : 'text',
+        padding: '0.1rem 0.25rem',
+        borderRadius: 2,
+        border: '1px dashed transparent',
+        transition: 'border-color 0.15s',
+      }}
+      onMouseEnter={(e) => { if (!disabled) (e.currentTarget as HTMLElement).style.borderColor = 'var(--cds-border-subtle)'; }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.borderColor = 'transparent'; }}
+    >
+      {fmt(value)}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ReviewPage
+// ---------------------------------------------------------------------------
 const ReviewPage: React.FC = () => {
-  const { jobId } = useParams<{ jobId: string }>();
-  const navigate = useNavigate();
+  const { jobId }  = useParams<{ jobId: string }>();
+  const navigate   = useNavigate();
 
-  const [job, setJob] = useState<InvoiceJob | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [actionLoading, setActionLoading] = useState<'approve' | 'reject' | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [confirmModal, setConfirmModal] = useState<'approve' | 'reject' | null>(null);
-  const [actionDone, setActionDone] = useState<'approved' | 'rejected' | null>(null);
+  const [job,      setJob]      = useState<InvoiceJob | null>(null);
+  const [loading,  setLoading]  = useState(true);
+  const [notice,   setNotice]   = useState<{ kind: 'error' | 'success' | 'info' | 'warning'; title: string; subtitle?: string } | null>(null);
+  const [acting,   setActing]   = useState(false);
 
+  // File viewer
+  const [blobUrl,          setBlobUrl]          = useState<string | null>(null);
+  const [viewerExpanded,   setViewerExpanded]   = useState(true);
+  const [zoom,             setZoom]             = useState(100);
+  const blobRef = useRef<string | null>(null);
+
+  // Reject modal
+  const [rejectOpen,   setRejectOpen]   = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
+
+  // Load job data
   useEffect(() => {
     if (!jobId) return;
     let cancelled = false;
     (async () => {
       try {
         const data = await getJob(jobId);
-        if (!cancelled) { setJob(data); setError(null); }
+        if (!cancelled) { setJob(data); }
       } catch (err: unknown) {
         if (!cancelled) {
-          const msg =
-            (err as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail ||
-            (err as Error)?.message ||
-            'Failed to load job.';
-          setError(msg);
+          setNotice({
+            kind: 'error',
+            title: 'Failed to load job.',
+            subtitle: (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+              ?? (err as Error).message,
+          });
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -81,59 +229,154 @@ const ReviewPage: React.FC = () => {
     return () => { cancelled = true; };
   }, [jobId]);
 
-  const handleAction = async (action: 'approve' | 'reject') => {
+  // Fetch invoice file as blob for the viewer
+  useEffect(() => {
     if (!jobId) return;
-    setConfirmModal(null);
-    setActionLoading(action);
-    setActionError(null);
-    try {
-      if (action === 'approve') {
-        await approveJob(jobId);
-      } else {
-        await rejectJob(jobId);
-      }
-      setActionDone(action === 'approve' ? 'approved' : 'rejected');
-    } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail ||
-        (err as Error)?.message ||
-        `Failed to ${action} invoice.`;
-      setActionError(msg);
-    } finally {
-      setActionLoading(null);
-    }
-  };
+    let cancelled = false;
+    // Revoke any stale blob — do not call setBlobUrl here, do it in the async callback
+    if (blobRef.current) { URL.revokeObjectURL(blobRef.current); blobRef.current = null; }
+    fetchInvoiceBlob(jobId)
+      .then((url) => {
+        if (cancelled) { URL.revokeObjectURL(url); return; }
+        blobRef.current = url;
+        setBlobUrl(null); // clear old first, then set new
+        setBlobUrl(url);
+      })
+      .catch(() => { /* viewer stays empty; no hard error */ });
+    return () => {
+      cancelled = true;
+      if (blobRef.current) { URL.revokeObjectURL(blobRef.current); blobRef.current = null; }
+    };
+  }, [jobId]);
 
-  const headerFields = job?.staged_header ? Object.entries(job.staged_header) : [];
-  const lineItems: Record<string, unknown>[] = Array.isArray(job?.staged_lines) ? job!.staged_lines : [];
-  const lineItemHeaders: string[] =
-    lineItems.length > 0
-      ? Object.keys(lineItems[0])
-      : ['description', 'quantity', 'unit_price', 'amount'];
+  // ---------------------------------------------------------------------------
+  // Inline header field save — PATCHes the whole staged_header
+  // ---------------------------------------------------------------------------
+  async function saveHeaderField(key: string, value: string) {
+    if (!job || !jobId) return;
+    const updated = { ...(job.staged_header ?? {}), [key]: value };
+    try {
+      const saved = await updateJob(jobId, { staged_header: updated });
+      setJob(saved);
+      setNotice({ kind: 'success', title: `"${HEADER_LABEL[key] ?? key}" updated.` });
+    } catch (err: unknown) {
+      setNotice({
+        kind: 'error',
+        title: 'Update failed.',
+        subtitle: (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+          ?? (err as Error).message,
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Approve
+  // ---------------------------------------------------------------------------
+  async function handleApprove() {
+    if (!jobId) return;
+    setActing(true);
+    setNotice(null);
+    try {
+      await approveJob(jobId);
+      setNotice({ kind: 'success', title: 'Invoice approved.', subtitle: 'Returning to jobs list…' });
+      setTimeout(() => navigate('/jobs'), 2000);
+    } catch (err: unknown) {
+      setNotice({
+        kind: 'error',
+        title: 'Approval failed.',
+        subtitle: (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+          ?? (err as Error).message,
+      });
+    } finally {
+      setActing(false);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reject
+  // ---------------------------------------------------------------------------
+  async function handleReject() {
+    if (!jobId || !rejectReason.trim()) return;
+    setActing(true);
+    setNotice(null);
+    try {
+      await rejectJob(jobId);
+      setNotice({ kind: 'warning', title: 'Invoice rejected.', subtitle: 'Returning to jobs list…' });
+      setRejectOpen(false);
+      setTimeout(() => navigate('/jobs'), 2000);
+    } catch (err: unknown) {
+      setNotice({
+        kind: 'error',
+        title: 'Rejection failed.',
+        subtitle: (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+          ?? (err as Error).message,
+      });
+    } finally {
+      setActing(false);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Derived values
+  // ---------------------------------------------------------------------------
+  const isReviewable = job?.status?.toLowerCase() === 'review';
+  const currentStep  = STEP_INDEX[job?.status?.toLowerCase() ?? ''] ?? 0;
+  const isPdf        = (job?.filename ?? '').toLowerCase().endsWith('.pdf');
+
+  const headerRows = job?.staged_header
+    ? Object.entries(job.staged_header)
+    : [];
+
+  const lineItems: Record<string, unknown>[] = Array.isArray(job?.staged_lines)
+    ? job!.staged_lines
+    : [];
+
+  // Download URL — direct endpoint (no auth needed for this service)
+  const downloadUrl = `/v1/invoices/${jobId}/file`;
+
+  // ---------------------------------------------------------------------------
+  if (loading) {
+    return (
+      <div style={{ padding: '2rem' }}>
+        <InlineLoading description="Loading invoice data…" />
+      </div>
+    );
+  }
 
   return (
     <>
-      {/* Modal must live outside the grid so it portals cleanly to body */}
+      {/* Reject modal */}
       <Modal
-        open={!!confirmModal}
-        modalHeading={confirmModal === 'approve' ? 'Approve Invoice?' : 'Reject Invoice?'}
-        primaryButtonText={confirmModal === 'approve' ? 'Approve' : 'Reject'}
+        open={rejectOpen}
+        danger
+        modalHeading="Reject Invoice"
+        primaryButtonText={acting ? 'Rejecting…' : 'Confirm Rejection'}
         secondaryButtonText="Cancel"
-        danger={confirmModal === 'reject'}
-        onRequestClose={() => setConfirmModal(null)}
-        onRequestSubmit={() => confirmModal && handleAction(confirmModal)}
+        primaryButtonDisabled={acting || !rejectReason.trim()}
+        onRequestSubmit={handleReject}
+        onRequestClose={() => setRejectOpen(false)}
+        size="sm"
       >
-        <p>
-          {confirmModal === 'approve'
-            ? 'This will mark the invoice as approved and move it to the approved queue.'
-            : 'This will reject the invoice. This action cannot be undone.'}
-        </p>
+        <Stack gap={5}>
+          <p className="cds--body-long-01">
+            Provide a reason for rejection. This cannot be undone.
+          </p>
+          <TextArea
+            id="reject-reason"
+            labelText="Rejection reason"
+            placeholder="e.g. Duplicate invoice, PO number mismatch…"
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+            rows={4}
+          />
+        </Stack>
       </Modal>
 
       <Grid className="cds--css-grid--full-width" style={{ padding: '2rem' }}>
         <Column lg={16} md={8} sm={4}>
+
+          {/* Breadcrumb */}
           <Breadcrumb style={{ marginBottom: '1rem' }}>
-            {/* href makes the item a real <a> for keyboard/a11y; onClick navigates via router */}
             <BreadcrumbItem
               href="/jobs"
               onClick={(e: React.MouseEvent) => { e.preventDefault(); navigate('/jobs'); }}
@@ -143,187 +386,404 @@ const ReviewPage: React.FC = () => {
             <BreadcrumbItem isCurrentPage>Review Invoice</BreadcrumbItem>
           </Breadcrumb>
 
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              justifyContent: 'space-between',
-              marginBottom: '1.5rem',
-              flexWrap: 'wrap',
-              gap: '1rem',
-            }}
-          >
-            {/* Use Section+Heading so the heading level is managed by Carbon's layout context */}
-            <Section>
-              <Heading className="cds--productive-heading-05">Review Invoice</Heading>
-              <p className="cds--body-long-01" style={{ marginTop: '0.25rem' }}>
-                Review extracted header fields, line items, and approve or reject the invoice.
-              </p>
-            </Section>
+          {/* Page heading */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
             <Button
               kind="ghost"
               renderIcon={ArrowLeft}
-              iconDescription="Back to Jobs"
+              iconDescription="Back"
+              hasIconOnly
+              size="sm"
               onClick={() => navigate('/jobs')}
-            >
-              Back to Jobs
-            </Button>
+            />
+            <div>
+              <p className="cds--productive-heading-05" style={{ margin: 0 }}>
+                {job?.filename ?? jobId}
+              </p>
+              <p className="cds--body-long-01" style={{ margin: 0, color: 'var(--cds-text-secondary)' }}>
+                Review extracted fields, preview the original file, and approve or reject.
+              </p>
+            </div>
+            {job?.status && (
+              <Tag
+                type={
+                  isReviewable ? 'purple'
+                  : job.status.toLowerCase() === 'approved' ? 'green'
+                  : job.status.toLowerCase() === 'rejected' ? 'red'
+                  : 'gray'
+                }
+              >
+                {job.status}
+              </Tag>
+            )}
           </div>
 
-          {error && (
-            <div style={{ marginBottom: '1rem' }}>
-              <InlineNotification
-                kind="error"
-                title="Error loading invoice."
-                subtitle={error}
-                onCloseButtonClick={() => setError(null)}
-              />
-            </div>
-          )}
+          {/* Pipeline progress */}
+          <Tile style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
+            <ProgressIndicator currentIndex={currentStep} spaceEqually>
+              {PIPELINE_STEPS.map((label, i) => (
+                <ProgressStep
+                  key={label}
+                  label={label}
+                  complete={i < currentStep}
+                  current={i === currentStep}
+                  invalid={
+                    (job?.status?.toLowerCase() === 'failed' && i === currentStep) ||
+                    (job?.status?.toLowerCase() === 'rejected' && i === currentStep)
+                  }
+                />
+              ))}
+            </ProgressIndicator>
+          </Tile>
 
-          {actionError && (
-            <div style={{ marginBottom: '1rem' }}>
-              <InlineNotification
-                kind="error"
-                title="Action failed."
-                subtitle={actionError}
-                onCloseButtonClick={() => setActionError(null)}
-              />
-            </div>
-          )}
-
-          {actionDone && (
-            <div style={{ marginBottom: '1rem' }}>
-              <InlineNotification
-                kind={actionDone === 'approved' ? 'success' : 'info'}
-                title={actionDone === 'approved' ? 'Invoice approved.' : 'Invoice rejected.'}
-                subtitle="You can now navigate back to the jobs list."
-              />
-            </div>
-          )}
-
-          {loading ? (
-            <div style={{ marginBottom: '2rem' }}>
-              <SkeletonText paragraph lineCount={3} />
-            </div>
-          ) : job ? (
-            <>
-              {/* Metadata summary tile — use a div inside Tile for flex layout */}
-              <Tile style={{ marginBottom: '1.5rem' }}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2rem' }}>
-                  <div>
-                    <p className="cds--label-01" style={{ marginBottom: '0.25rem' }}>File</p>
-                    <strong className="cds--body-short-02">{job.filename}</strong>
-                  </div>
-                  <div>
-                    <p className="cds--label-01" style={{ marginBottom: '0.25rem' }}>Status</p>
-                    <Tag type="purple" size="sm">{job.status}</Tag>
-                  </div>
-                  <div>
-                    <p className="cds--label-01" style={{ marginBottom: '0.25rem' }}>Job ID</p>
-                    <code className="cds--body-short-01">{job.job_id}</code>
-                  </div>
-                  <div>
-                    <p className="cds--label-01" style={{ marginBottom: '0.25rem' }}>Submitted</p>
-                    <span className="cds--body-short-01">
-                      {job.submitted_at ? new Date(job.submitted_at).toLocaleString() : '—'}
-                    </span>
-                  </div>
-                </div>
+          {/* Summary cards */}
+          <Grid fullWidth style={{ marginBottom: '1.5rem', padding: 0 }}>
+            <Column lg={4} md={2} sm={4}>
+              <Tile style={{ padding: '1rem', height: '100%' }}>
+                <p className="cds--label-01" style={{ marginBottom: '0.25rem' }}>Job ID</p>
+                <code className="cds--body-short-01" style={{ wordBreak: 'break-all' }}>{job?.job_id}</code>
               </Tile>
+            </Column>
+            <Column lg={4} md={2} sm={4}>
+              <Tile style={{ padding: '1rem', height: '100%' }}>
+                <p className="cds--label-01" style={{ marginBottom: '0.25rem' }}>Submitted</p>
+                <span className="cds--body-short-02">
+                  {job?.submitted_at ? new Date(job.submitted_at).toLocaleString() : '—'}
+                </span>
+              </Tile>
+            </Column>
+            <Column lg={4} md={2} sm={4}>
+              <Tile style={{ padding: '1rem', height: '100%' }}>
+                <p className="cds--label-01" style={{ marginBottom: '0.25rem' }}>Total</p>
+                <strong className="cds--productive-heading-03">
+                  {job?.staged_header?.total != null
+                    ? `${job.staged_header.currency ?? ''} ${job.staged_header.total}`.trim()
+                    : '—'}
+                </strong>
+              </Tile>
+            </Column>
+            <Column lg={4} md={2} sm={4}>
+              <Tile style={{ padding: '1rem', height: '100%' }}>
+                <p className="cds--label-01" style={{ marginBottom: '0.25rem' }}>Lines extracted</p>
+                <strong className="cds--productive-heading-03">{lineItems.length}</strong>
+              </Tile>
+            </Column>
+          </Grid>
 
-              {/* Header fields */}
-              <p className="cds--productive-heading-02" style={{ marginBottom: '0.75rem' }}>
-                Extracted Header Fields
-              </p>
-              {headerFields.length === 0 ? (
-                <p className="cds--body-long-01" style={{ marginBottom: '1.5rem' }}>
-                  No extracted header data available.
-                </p>
-              ) : (
-                <TableContainer style={{ marginBottom: '1.5rem' }}>
-                  <Table size="sm" useZebraStyles>
-                    <TableHead>
-                      <TableRow>
-                        <TableHeader>Field</TableHeader>
-                        <TableHeader>Value</TableHeader>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {headerFields.map(([key, value]) => (
-                        <TableRow key={key}>
-                          <TableCell>
-                            <strong>{HEADER_LABEL[key] ?? key}</strong>
-                          </TableCell>
-                          <TableCell>{formatFieldValue(value)}</TableCell>
+          {/* Error / pipeline failure */}
+          {job?.error && (
+            <div style={{ marginBottom: '1rem' }}>
+              <InlineNotification
+                kind="error"
+                title="Pipeline error"
+                subtitle={job.error}
+                lowContrast
+              />
+            </div>
+          )}
+
+          {/* Action notifications */}
+          {notice && (
+            <div style={{ marginBottom: '1.5rem' }}>
+              <InlineNotification
+                kind={notice.kind}
+                title={notice.title}
+                subtitle={notice.subtitle}
+                onCloseButtonClick={() => setNotice(null)}
+              />
+            </div>
+          )}
+
+          {/* ---------------------------------------------------------------- */}
+          {/* Side-by-side: Header fields (left) + Invoice viewer (right)      */}
+          {/* ---------------------------------------------------------------- */}
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', marginBottom: '2rem' }}>
+
+            {/* Left — extracted header fields */}
+            <div style={{ flex: '0 0 50%', minWidth: 0 }}>
+              <Layer>
+                <TableContainer
+                  title="Invoice Header"
+                  description={isReviewable ? 'Click any highlighted cell to edit it in place.' : undefined}
+                >
+                  <div style={{ maxHeight: '75vh', overflowY: 'auto' }}>
+                    <Table size="sm">
+                      <TableHead>
+                        <TableRow>
+                          <TableHeader style={{ width: '40%' }}>Field</TableHeader>
+                          <TableHeader>Value</TableHeader>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                      </TableHead>
+                      <TableBody>
+                        {headerRows.length === 0 ? (
+                          <TableRow>
+                            <TableCell colSpan={2} style={{ textAlign: 'center', color: 'var(--cds-text-secondary)', padding: '2rem' }}>
+                              No header data extracted yet.
+                            </TableCell>
+                          </TableRow>
+                        ) : (
+                          headerRows.map(([key, value]) => {
+                            const editable = isReviewable && EDITABLE_HEADER_KEYS.has(key);
+                            return (
+                              <TableRow
+                                key={key}
+                                style={editable ? { background: 'var(--cds-layer-accent)' } : undefined}
+                              >
+                                <TableCell>
+                                  <span style={{ fontFamily: 'IBM Plex Mono, monospace', fontSize: '0.75rem' }}>
+                                    {HEADER_LABEL[key] ?? key}
+                                  </span>
+                                  {editable && (
+                                    <span style={{ marginLeft: '0.4rem', fontSize: '0.65rem', color: 'var(--cds-link-primary)' }}>
+                                      editable
+                                    </span>
+                                  )}
+                                </TableCell>
+                                <TableCell>
+                                  {editable ? (
+                                    <EditableCell
+                                      value={value}
+                                      onSave={(v) => saveHeaderField(key, v)}
+                                      disabled={false}
+                                    />
+                                  ) : (
+                                    fmt(value)
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
                 </TableContainer>
-              )}
+              </Layer>
+            </div>
 
-              {/* Line items */}
-              <p className="cds--productive-heading-02" style={{ marginBottom: '0.75rem' }}>
-                Line Items
-              </p>
-              {lineItems.length === 0 ? (
-                <p className="cds--body-long-01" style={{ marginBottom: '2rem' }}>
-                  No line items extracted.
-                </p>
-              ) : (
-                <TableContainer style={{ marginBottom: '2rem' }}>
-                  <Table size="sm" useZebraStyles>
-                    <TableHead>
-                      <TableRow>
-                        {lineItemHeaders.map((h) => (
-                          <TableHeader key={h}>
-                            {HEADER_LABEL[h] ?? h.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}
-                          </TableHeader>
-                        ))}
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {lineItems.map((item, idx) => (
-                        <TableRow key={idx}>
-                          {lineItemHeaders.map((h) => (
-                            <TableCell key={h}>{formatFieldValue(item[h])}</TableCell>
-                          ))}
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </TableContainer>
-              )}
+            {/* Right — invoice file viewer */}
+            <div style={{ flex: '0 0 50%', minWidth: 0 }}>
+              <Layer>
+                <Tile style={{ padding: 0 }}>
+                  {/* Collapsible toolbar */}
+                  <button
+                    onClick={() => setViewerExpanded((v) => !v)}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '0.85rem 1rem', background: 'none', border: 'none', cursor: 'pointer',
+                      borderBottom: viewerExpanded ? '1px solid var(--cds-border-subtle)' : 'none',
+                    }}
+                  >
+                    <span className="cds--body-short-02">
+                      Original Invoice — {job?.filename ?? jobId}
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                      {/* Zoom controls */}
+                      {viewerExpanded && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+                        >
+                          <button
+                            title="Zoom out"
+                            disabled={zoom <= ZOOM_MIN}
+                            onClick={() => setZoom((z) => Math.max(ZOOM_MIN, z - ZOOM_STEP))}
+                            style={{
+                              background: 'none', border: '1px solid var(--cds-border-subtle)',
+                              borderRadius: 3, padding: '0.2rem 0.35rem',
+                              cursor: zoom <= ZOOM_MIN ? 'default' : 'pointer',
+                              opacity: zoom <= ZOOM_MIN ? 0.4 : 1, display: 'flex', alignItems: 'center',
+                            }}
+                          >
+                            <ZoomOut size={16} />
+                          </button>
+                          <span style={{ fontSize: '0.75rem', minWidth: '3rem', textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>
+                            {zoom}%
+                          </span>
+                          <button
+                            title="Zoom in"
+                            disabled={zoom >= ZOOM_MAX}
+                            onClick={() => setZoom((z) => Math.min(ZOOM_MAX, z + ZOOM_STEP))}
+                            style={{
+                              background: 'none', border: '1px solid var(--cds-border-subtle)',
+                              borderRadius: 3, padding: '0.2rem 0.35rem',
+                              cursor: zoom >= ZOOM_MAX ? 'default' : 'pointer',
+                              opacity: zoom >= ZOOM_MAX ? 0.4 : 1, display: 'flex', alignItems: 'center',
+                            }}
+                          >
+                            <ZoomIn size={16} />
+                          </button>
+                          {zoom !== 100 && (
+                            <button
+                              title="Reset zoom"
+                              onClick={() => setZoom(100)}
+                              style={{
+                                background: 'none', border: '1px solid var(--cds-border-subtle)',
+                                borderRadius: 3, padding: '0.2rem 0.35rem',
+                                cursor: 'pointer', display: 'flex', alignItems: 'center',
+                              }}
+                            >
+                              <Reset size={16} />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {/* Download / open */}
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}
+                      >
+                        <a
+                          href={downloadUrl}
+                          download={job?.filename ?? 'invoice'}
+                          style={{ fontSize: '0.75rem', color: 'var(--cds-link-primary)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+                        >
+                          <Download size={14} />
+                          Download
+                        </a>
+                        {blobUrl && (
+                          <button
+                            onClick={() => window.open(blobUrl, '_blank')}
+                            style={{ background: 'none', border: 'none', padding: 0, fontSize: '0.75rem', color: 'var(--cds-link-primary)', cursor: 'pointer', textDecoration: 'underline' }}
+                          >
+                            Open in new tab
+                          </button>
+                        )}
+                      </div>
+                      {viewerExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                    </div>
+                  </button>
 
-              {/* Approve / Reject actions */}
-              {!actionDone && (
-                <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                  <Button
-                    kind="primary"
-                    renderIcon={CheckmarkFilled}
-                    disabled={!!actionLoading}
-                    onClick={() => setConfirmModal('approve')}
-                  >
-                    Approve Invoice
-                  </Button>
-                  <Button
-                    kind="danger"
-                    renderIcon={CloseFilled}
-                    disabled={!!actionLoading}
-                    onClick={() => setConfirmModal('reject')}
-                  >
-                    Reject Invoice
-                  </Button>
-                  {actionLoading && (
-                    <InlineLoading
-                      description={actionLoading === 'approve' ? 'Approving…' : 'Rejecting…'}
-                    />
+                  {/* Viewer body */}
+                  {viewerExpanded && (
+                    <div style={{ padding: '0.75rem' }}>
+                      {!blobUrl ? (
+                        <div style={{
+                          height: '70vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          border: '1px solid var(--cds-border-subtle)', borderRadius: 2,
+                          background: 'var(--cds-layer)', color: 'var(--cds-text-secondary)',
+                        }}>
+                          <InlineLoading description="Loading file…" />
+                        </div>
+                      ) : isPdf ? (
+                        <iframe
+                          src={blobUrl}
+                          title="Original Invoice"
+                          style={{ width: '100%', height: '70vh', border: '1px solid var(--cds-border-subtle)', borderRadius: 2 }}
+                        />
+                      ) : (
+                        <div style={{
+                          overflow: 'auto', height: '70vh',
+                          border: '1px solid var(--cds-border-subtle)', borderRadius: 2,
+                          background: 'var(--cds-layer)',
+                        }}>
+                          <img
+                            src={blobUrl}
+                            alt="Original Invoice"
+                            style={{ display: 'block', margin: '0 auto', width: `${zoom}%`, maxWidth: 'none' }}
+                          />
+                        </div>
+                      )}
+                    </div>
                   )}
-                </div>
-              )}
-            </>
-          ) : null}
+                </Tile>
+              </Layer>
+            </div>
+          </div>
+
+          {/* ---------------------------------------------------------------- */}
+          {/* Line items table                                                  */}
+          {/* ---------------------------------------------------------------- */}
+          <Layer style={{ marginBottom: '2rem' }}>
+            <TableContainer
+              title={`Invoice Lines (${lineItems.length})`}
+              description={isReviewable ? 'Click any cell to edit it in place.' : undefined}
+            >
+              <Table size="sm">
+                <TableHead>
+                  <TableRow>
+                    {LINE_COLS.map((c) => (
+                      <TableHeader key={c.key}>{c.label}</TableHeader>
+                    ))}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {lineItems.length === 0 ? (
+                    <TableRow>
+                      <TableCell
+                        colSpan={LINE_COLS.length}
+                        style={{ textAlign: 'center', color: 'var(--cds-text-secondary)', padding: '2rem' }}
+                      >
+                        No lines extracted yet.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    lineItems.map((line, idx) => (
+                      <TableRow key={idx}>
+                        {LINE_COLS.map((col) => {
+                          const editable = isReviewable;
+                          return (
+                            <TableCell
+                              key={col.key}
+                              style={editable ? { background: 'var(--cds-layer-accent)' } : undefined}
+                            >
+                              {editable ? (
+                                <EditableCell
+                                  value={line[col.key]}
+                                  onSave={(v) => {
+                                    const updatedLines = lineItems.map((l, i) =>
+                                      i === idx ? { ...l, [col.key]: v } : l
+                                    );
+                                    updateJob(jobId!, { staged_lines: updatedLines })
+                                      .then((saved) => setJob(saved))
+                                      .catch((err: unknown) => setNotice({
+                                        kind: 'error',
+                                        title: 'Line update failed.',
+                                        subtitle: (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+                                          ?? (err as Error).message,
+                                      }));
+                                  }}
+                                  disabled={false}
+                                />
+                              ) : (
+                                fmt(line[col.key])
+                              )}
+                            </TableCell>
+                          );
+                        })}
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Layer>
+
+          {/* ---------------------------------------------------------------- */}
+          {/* Approve / Reject action bar                                       */}
+          {/* ---------------------------------------------------------------- */}
+          {isReviewable && (
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <Button
+                renderIcon={Checkmark}
+                disabled={acting}
+                onClick={handleApprove}
+              >
+                {acting ? 'Processing…' : 'Approve Invoice'}
+              </Button>
+              <Button
+                kind="danger"
+                renderIcon={Close}
+                disabled={acting}
+                onClick={() => setRejectOpen(true)}
+              >
+                Reject Invoice
+              </Button>
+              {acting && <InlineLoading description="Submitting…" />}
+            </div>
+          )}
+
         </Column>
       </Grid>
     </>
