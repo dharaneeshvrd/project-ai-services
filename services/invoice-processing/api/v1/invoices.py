@@ -3,13 +3,16 @@ Invoice Processing v1 API endpoints.
 """
 
 import asyncio
+import mimetypes
+import shutil
 import uuid
 from datetime import datetime, timezone
 from math import ceil
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from common.misc_utils import get_logger
 
 from clients.digitize_client import DigitizeClient
@@ -22,6 +25,7 @@ from models import (
     PaginationInfo,
     UpdateInvoiceJobRequest,
 )
+from pipeline.assembler import assemble_invoice
 from pipeline.oneshot_path import run_oneshot_path
 from pipeline.pdf_path import run_pdf_path
 from pipeline.router import detect_input_type
@@ -50,7 +54,7 @@ async def _run_pipeline(job_id: str, staged_path: Path, input_type: str) -> None
 
     The job moves ``accepted`` → ``extracting`` as soon as it is picked up and
     stays ``extracting`` through digitize, extract and ``assemble_invoice``;
-    it then moves directly to ``review`` (PR-7).
+    it then moves directly to ``review``.
 
     Routing decision:
     - ``"image"`` → One-Shot path: forward directly to extract VLM endpoint.
@@ -65,7 +69,7 @@ async def _run_pipeline(job_id: str, staged_path: Path, input_type: str) -> None
                 f"[{job_id}] Routing decision: image → One-Shot path (extract VLM)"
             )
             extract_client = ExtractClient(base_url=settings.invoice.extract_url)
-            await run_oneshot_path(
+            raw = await run_oneshot_path(
                 job_id=job_id,
                 staged_path=staged_path,
                 extract_client=extract_client,
@@ -75,17 +79,28 @@ async def _run_pipeline(job_id: str, staged_path: Path, input_type: str) -> None
                 f"[{job_id}] Routing decision: pdf → PDF path (digitize)"
             )
             digitize_client = DigitizeClient(base_url=settings.invoice.digitize_url)
-            await run_pdf_path(
+            raw = await run_pdf_path(
                 job_id=job_id,
                 staged_path=staged_path,
                 digitize_client=digitize_client,
             )
 
+        header, lines = assemble_invoice(raw=raw, job_id=job_id, filename=staged_path.name)
+
+        # Persist structured JSON exclusively to PostgreSQL DB (JSONB fields)
+        db_manager.update_job(
+            job_id=job_id,
+            status="review",
+            staged_header=header,
+            staged_lines=lines,
+        )
+        logger.info(
+            f"Job {job_id!r} completed assembly, stored in DB, waiting for human review"
+        )
+
     except Exception as exc:
         logger.error(f"Pipeline failed for job {job_id!r}: {exc}", exc_info=True)
         db_manager.update_job(job_id=job_id, status="failed", error=str(exc))
-    finally:
-        staged_path.unlink(missing_ok=True)
 
 
 def _job_to_response(job) -> InvoiceJobDetailResponse:
@@ -187,14 +202,49 @@ async def list_invoice_jobs(
     )
 
 # ---------------------------------------------------------------------------
-# PATCH /v1/invoices/{job_id}   (stub — PR-7)
+# GET /v1/invoices/{job_id}/file
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{job_id}/file",
+    summary="Download or preview original invoice file",
+)
+async def get_invoice_file(job_id: str):
+    """Stream the original uploaded PDF or image file for human review and UI preview."""
+    job = db_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invoice job {job_id!r} not found",
+        )
+    file_path = settings.invoice.staging_dir / job_id / (job.filename or "upload")
+    if not file_path.exists() or not file_path.is_file():
+        job_dir = settings.invoice.staging_dir / job_id
+        staged_files = [p for p in job_dir.iterdir() if p.is_file()] if job_dir.exists() else []
+        if staged_files:
+            file_path = staged_files[0]
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Invoice file for job {job_id!r} not found on disk",
+            )
+    media_type, _ = mimetypes.guess_type(str(file_path))
+    return FileResponse(
+        path=file_path,
+        filename=job.filename or file_path.name,
+        media_type=media_type or "application/octet-stream",
+        content_disposition_type="inline",
+    )
+
+
+# ---------------------------------------------------------------------------
+# PATCH /v1/invoices/{job_id}
 # ---------------------------------------------------------------------------
 
 @router.patch(
     "/{job_id}",
     response_model=InvoiceJobDetailResponse,
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Update staged invoice fields for human review (Stub)",
+    summary="Update staged invoice fields for human review",
 )
 async def update_invoice_job(job_id: str, body: UpdateInvoiceJobRequest):
     """Correct extracted invoice data while the job is in REVIEW status.
@@ -204,20 +254,42 @@ async def update_invoice_job(job_id: str, body: UpdateInvoiceJobRequest):
     approving.  The job must be in ``review`` status; any other status
     returns HTTP 409.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Invoice job update is not implemented in boilerplate scaffold.",
-    )
+    job = db_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invoice job {job_id!r} not found",
+        )
+    if job.status != "review":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Job {job_id!r} is in '{job.status}' status; only jobs in 'review' status can be updated.",
+        )
+
+    update_kwargs = {}
+    if body.staged_header is not None:
+        update_kwargs["staged_header"] = body.staged_header
+    if body.staged_lines is not None:
+        update_kwargs["staged_lines"] = body.staged_lines
+
+    if update_kwargs:
+        job = db_manager.update_job(job_id=job_id, **update_kwargs)
+        if job is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to update job {job_id!r}",
+            )
+    return _job_to_response(job)
 
 
 # ---------------------------------------------------------------------------
-# DELETE /v1/invoices/{job_id}   (stub — PR-7)
+# DELETE /v1/invoices/{job_id}
 # ---------------------------------------------------------------------------
 
 @router.delete(
     "/{job_id}",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Delete an invoice processing job (Stub)",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an invoice processing job",
 )
 async def delete_invoice_job(job_id: str):
     """Delete an invoice job record and any associated staged data.
@@ -226,41 +298,89 @@ async def delete_invoice_job(job_id: str):
     still in ``review`` may be deleted.  Jobs actively in-flight
     (``accepted``, ``extracting``) return HTTP 409 — cancel is not supported.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Invoice job deletion is not implemented in boilerplate scaffold.",
-    )
+    job = db_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invoice job {job_id!r} not found",
+        )
+    if job.status in ("accepted", "extracting"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Job {job_id!r} is currently {job.status} and cannot be deleted.",
+        )
+
+    deleted = db_manager.delete_job(job_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete job {job_id!r}",
+        )
+
+    job_dir = settings.invoice.staging_dir / job_id
+    if job_dir.exists():
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ---------------------------------------------------------------------------
-# POST /v1/invoices/{job_id}/approve   (stub — PR-7)
+# POST /v1/invoices/{job_id}/approve
 # ---------------------------------------------------------------------------
 
 @router.post(
     "/{job_id}/approve",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Approve reviewed invoice (stub — PR-7)",
+    response_model=InvoiceJobDetailResponse,
+    summary="Approve reviewed invoice",
 )
 async def approve_invoice_job(job_id: str):
-    """Approve a reviewed invoice (review → approved). Implemented in PR-7."""
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Invoice job approval is not yet implemented (PR-7).",
-    )
+    """Approve a reviewed invoice (review → approved)."""
+    job = db_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invoice job {job_id!r} not found",
+        )
+    if job.status != "review":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Job {job_id!r} is in '{job.status}' status; only jobs in 'review' status can be approved.",
+        )
+    job = db_manager.update_job(job_id=job_id, status="approved")
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to approve job {job_id!r}",
+        )
+    return _job_to_response(job)
 
 
 # ---------------------------------------------------------------------------
-# POST /v1/invoices/{job_id}/reject   (stub — PR-7)
+# POST /v1/invoices/{job_id}/reject
 # ---------------------------------------------------------------------------
 
 @router.post(
     "/{job_id}/reject",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Reject staged invoice (stub — PR-7)",
+    response_model=InvoiceJobDetailResponse,
+    summary="Reject staged invoice",
 )
 async def reject_invoice_job(job_id: str):
-    """Reject a staged invoice. Implemented in PR-7."""
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Invoice job rejection is not yet implemented (PR-7).",
-    )
+    """Reject a staged invoice (review → rejected)."""
+    job = db_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invoice job {job_id!r} not found",
+        )
+    if job.status != "review":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Job {job_id!r} is in '{job.status}' status; only jobs in 'review' status can be rejected.",
+        )
+    job = db_manager.update_job(job_id=job_id, status="rejected")
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reject job {job_id!r}",
+        )
+    return _job_to_response(job)

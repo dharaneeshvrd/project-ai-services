@@ -137,5 +137,23 @@ class DatabaseManager:
             logger.error(f"DB error listing jobs: {exc}", exc_info=True)
             return [], 0
 
+    @staticmethod
+    def delete_job(job_id: str) -> bool:
+        """Delete an invoice job row by primary key.
+
+        Returns True if deleted, False if not found or on DB error.
+        """
+        try:
+            with get_db_session() as session:
+                job = session.get(InvoiceJob, job_id)
+                if job is None:
+                    return False
+                session.delete(job)
+                session.flush()
+                return True
+        except SQLAlchemyError as exc:
+            logger.error(f"DB error deleting job {job_id!r}: {exc}", exc_info=True)
+            return False
+
 
 db_manager = DatabaseManager()
