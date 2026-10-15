@@ -29,20 +29,20 @@ INVOICE_SCHEMA_PAYLOAD = {
                 # rebuilds the parent's "required" array from the True flags, so a
                 # standard array on this nested object would be silently dropped.
                 "properties": {
-                    "INVOICE_NUM": {"type": "string", "required": True},
+                    "INVOICE_NUM": {"type": ["string", "null"], "required": True},
                     "INVOICE_TYPE_LOOKUP_CODE": {"type": ["string", "null"], "default": "STANDARD"},
                     "INVOICE_DATE": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": "DD-MON-YY preferred",
                         "required": True,
                     },
                     "VENDOR_ID": {"type": ["integer", "null"]},
                     "VENDOR_NUM": {"type": ["string", "null"]},
-                    "VENDOR_NAME": {"type": "string", "required": True},
+                    "VENDOR_NAME": {"type": ["string", "null"], "required": True},
                     "VENDOR_SITE_ID": {"type": ["integer", "null"]},
                     "VENDOR_SITE_CODE": {"type": ["string", "null"]},
-                    "INVOICE_AMOUNT": {"type": "number", "required": True},
-                    "INVOICE_CURRENCY_CODE": {"type": "string", "required": True},
+                    "INVOICE_AMOUNT": {"type": ["number", "null"], "required": True},
+                    "INVOICE_CURRENCY_CODE": {"type": ["string", "null"], "required": True},
                     "EXCHANGE_RATE": {"type": ["number", "null"]},
                     "EXCHANGE_RATE_TYPE": {"type": ["string", "null"]},
                     "EXCHANGE_DATE": {"type": ["string", "null"]},
@@ -94,9 +94,9 @@ INVOICE_SCHEMA_PAYLOAD = {
                         "UNIT_PRICE",
                     ],
                     "properties": {
-                        "LINE_NUMBER": {"type": "integer"},
+                        "LINE_NUMBER": {"type": ["integer", "null"]},
                         "LINE_TYPE_LOOKUP_CODE": {"type": ["string", "null"], "default": "ITEM"},
-                        "AMOUNT": {"type": "number", "description": "Line total (AMOUNT column)"},
+                        "AMOUNT": {"type": ["number", "null"], "description": "Line total (AMOUNT column)"},
                         "QUANTITY_INVOICED": {
                             "type": ["number", "null"],
                             "description": "Quantity (QTY column)",

@@ -53,7 +53,7 @@ def test_line_item_required_fields():
 
 
 def test_required_line_fields_remain_nullable():
-    for name in ("DESCRIPTION", "QUANTITY_INVOICED", "UNIT_PRICE"):
+    for name in ("LINE_NUMBER", "AMOUNT", "DESCRIPTION", "QUANTITY_INVOICED", "UNIT_PRICE"):
         assert "null" in LINE_SCHEMA["properties"][name]["type"], name
 
 
