@@ -56,6 +56,8 @@ def mock_diagnostic_crash_handler():
 # Ensure all package levels exist first.
 for _pkg in [
     "docling",
+    "docling.backend",
+    "docling.backend.docling_parse_backend",
     "docling.datamodel",
     "docling.datamodel.document",
     "docling.document_converter",
@@ -67,6 +69,7 @@ for _pkg in [
     _stub_module(_pkg)
 
 # Expose the symbols that docling_utils.py imports at module level.
+sys.modules["docling.backend.docling_parse_backend"].DoclingParseDocumentBackend = MagicMock(name="DoclingParseDocumentBackend")
 sys.modules["docling.datamodel.document"].ConversionResult = MagicMock(name="ConversionResult")
 sys.modules["docling.document_converter"].DocumentConverter = MagicMock(name="DocumentConverter")
 sys.modules["docling_core.types.doc.document"].DoclingDocument = MagicMock(name="DoclingDocument")
