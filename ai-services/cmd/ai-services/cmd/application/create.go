@@ -35,7 +35,7 @@ import (
 const (
 	// Polling configuration.
 	pollInterval       = 20 * time.Second
-	pollTimeout        = 20 * time.Minute
+	pollTimeout        = 1 * time.Hour
 	paramSplitParts    = 2
 	expectedParamParts = 2
 )

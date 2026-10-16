@@ -17,9 +17,19 @@
           "const": "ibm-granite/granite-4.1-8b-fp8",
           "title": "granite-4.1-8b-fp8",
           "description": "An 8b-parameter instruction-tuned LLM used for natural language understanding and generation tasks. In this project, it powers tasks such as prompt-based reasoning, summarization, answer generation, and other LLM-driven functionalities.\n\n**Model strengths**: Reliable instruction-following, natural conversation, strong reasoning, and enterprise-grade accuracy.\n\n**Supported Languages**: English (primary), Spanish, French, German, Portuguese, Italian, Japanese, Korean, Chinese, Arabic, and 100+ more."
+        },
+        {
+          "const": "google/gemma-4-26B-A4B-it",
+          "title": "gemma-4-26B-A4B-it",
+          "description": "A 26B-parameter multimodal instruction-tuned model from Google. Runs on a single Spyre card (tp=1) using the Spyre 2.0 inference image.\n\n**Model strengths**: Strong reasoning, multimodal understanding, and instruction-following.\n\n**Supported Languages**: English (primary) and 140+ languages."
+        },
+        {
+          "const": "mistralai/Ministral-3-14B-Instruct-2512-BF16",
+          "title": "Ministral-3-14B-Instruct-2512-BF16",
+          "description": "A 14B-parameter instruction-tuned model from Mistral AI in BF16 precision. Requires 4 Spyre cards (tp=4) using the Spyre 3.6 inference image.\n\n**Model strengths**: Fast inference, strong instruction-following, text-only tasks.\n\n**Supported Languages**: English (primary), French, German, Spanish, Italian, and more."
         }
       ],
-      "default": "ibm-granite/granite-4.1-8b-fp8"
+      "default": "google/gemma-4-26B-A4B-it"
     },
     "apiKey": {
       "type": "string",

@@ -35,13 +35,11 @@ spec:
   containers:
     - name: instruct
       image: "{{ .Values.instruct.image }}"
-      command: ["/bin/bash"]
+      command: ["/bin/bash", "-l", "-c"]
       args:
-        - "-c"
         - |
-          /opt/app-root/spyre_entrypoint.sh \
-          --model ${VLLM_MODEL_PATH} \
-          -tp ${AIU_WORLD_SIZE} \
+          vllm serve ${VLLM_MODEL_PATH} \
+          -tp 1 \
           --max-model-len ${MAX_MODEL_LEN} \
           --max-num-seqs ${MAX_BATCH_SIZE} \
           --served-model-name {{ .Values.instruct.model.name }} --port 8000
@@ -49,17 +47,21 @@ spec:
         httpGet:
           path: /health
           port: 8000
-        initialDelaySeconds: 420
+        initialDelaySeconds: 30
         periodSeconds: 30
         timeoutSeconds: 5
-        failureThreshold: 3
+        failureThreshold: 120
       env:
         - name: VLLM_MODEL_PATH
           value: "/models/{{ .Values.instruct.model.name }}"
-        - name: AIU_WORLD_SIZE
-          value: "4"
-        - name: VLLM_SPYRE_USE_CB
+        - name: FRONTEND_POOL_ALLOCATION
           value: "1"
+        - name: AIU_WORLD_SIZE
+          value: "1"
+        - name: SPYRE_DEVICES
+          value: "0"
+        - name: HF_HUB_DOWNLOAD_TIMEOUT
+          value: "1800"
         - name: MAX_MODEL_LEN
           value: "{{ .Values.instruct.model.maxModelLen }}"
         - name: MAX_BATCH_SIZE
@@ -80,7 +82,7 @@ spec:
         {{- end }}
       resources:
         requests:
-          podman.io/device=/dev/vfio: 4
+          podman.io/device=/dev/vfio: 1
           memory: "200Gi"
         limits:
           memory: "200Gi"
