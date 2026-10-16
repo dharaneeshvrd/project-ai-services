@@ -153,7 +153,7 @@ class ExtractDocument(Base):
         nullable=False,
     )
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
-    source_type: Mapped[str] = mapped_column(String(10), nullable=False)  # 'txt' | 'md'
+    source_type: Mapped[str] = mapped_column(String(10), nullable=False)  # 'txt' | 'md' | 'png' | 'jpg' | 'jpeg' | 'tiff' | 'tif'
 
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -185,7 +185,7 @@ class ExtractDocument(Base):
             name="chk_doc_status",
         ),
         CheckConstraint(
-            "source_type IN ('txt', 'md')",
+            "source_type IN ('txt', 'md', 'png', 'jpg', 'jpeg', 'tiff', 'tif')",
             name="chk_doc_source_type",
         ),
         Index("idx_extract_documents_job_id", "job_id"),
