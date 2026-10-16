@@ -14,6 +14,18 @@ from common.settings import Settings as CommonSettings
 
 logger = get_logger("settings")
 
+# ---------------------------------------------------------------------------
+# Vision-capable model names.
+# If the configured LLM model matches any of these (exact string match),
+# image extraction is enabled and VISION_MODEL_PRESENT is set to True at startup.
+# ---------------------------------------------------------------------------
+VISION_MODEL_NAMES: frozenset[str] = frozenset({
+    "mistralai/Ministral-3-14B-Instruct-2512-BF16",
+    "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+    "ibm-granite/granite-vision-4.1-4b",
+    "google/gemma-4-26B-A4B-it",
+})
+
 
 class ExtractionConfig(BaseSettings):
     """Extraction-specific settings."""
@@ -114,6 +126,16 @@ class ExtractionConfig(BaseSettings):
         description=(
             "User prompt template for extraction requests (Section 8.1).  "
             "Placeholders: {normalized_json_schema}, {few_shot_block}, {input_text}."
+        ),
+    )
+
+    # Vision capability flag — set at startup by inspecting the loaded model name.
+    # Not read from the environment; written by app.py after initialize_models().
+    vision_model_present: bool = Field(
+        default=False,
+        description=(
+            "True when the configured LLM is one of the known vision-capable models. "
+            "Set programmatically at startup; do not set via environment variable."
         ),
     )
 

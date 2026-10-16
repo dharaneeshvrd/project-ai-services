@@ -318,10 +318,17 @@ async def extract_sync(request: Request, body: ExtractionRequest) -> JSONRespons
     },
     summary="Create async extraction job",
     description=(
-        "Submit one or more `.txt` or `.md` files for asynchronous entity extraction "
-        "against a registered schema.  Returns immediately with a `job_id`.\n\n"
+        "Submit one or more files for asynchronous entity extraction against a "
+        "registered schema.  Returns immediately with a `job_id`.\n\n"
+        "**Accepted file types:**\n"
+        "- `.txt` / `.md` — extracted via the text LLM\n"
+        "- `.png` / `.jpg` / `.tiff` — extracted via the configured vision model "
+        "(requires `VISION_LLM_ENDPOINT` and `VISION_LLM_MODEL` to be set; "
+        "returns 503 if not configured)\n\n"
+        "PDF files are **not** accepted here — convert them to md/txt with the "
+        "digitize service first.\n\n"
         "**Form parameters:**\n"
-        "- `files` (required): One or more `.txt` or `.md` files (no duplicates)\n"
+        "- `files` (required): One or more files to extract from (no duplicates)\n"
         "- `schema_id` (optional): ID of a registered schema\n"
         "- `schema_name` (optional): Name of a registered schema\n"
         "- `json_schema` (optional): Ephemeral JSON Schema\n"
@@ -345,7 +352,10 @@ async def extract_sync(request: Request, body: ExtractionRequest) -> JSONRespons
                                     "type": "string",
                                     "format": "binary",
                                 },
-                                "description": "One or more .txt or .md files to extract from (no duplicates)",
+                                "description": (
+                                    "One or more files to extract from (no duplicates). "
+                                    "Accepted: .txt, .md, .png, .jpg, .tiff"
+                                ),
                             },
                             "schema_id": {
                                 "type": "string",
@@ -422,12 +432,22 @@ async def create_extract_job(
         if not is_valid:
             raw_ext = os.path.splitext(filename)[1] or "unknown"
             msg = (
-                f"Only .txt and .md files are accepted. "
+                f"Only .txt, .md, .png, .jpg, and .tiff files are accepted. "
                 f"File at index {idx} ({filename!r}) has extension: {raw_ext}"
             )
             logger.error(msg)
             APIError.raise_error(ErrorCode.UNSUPPORTED_FILE_TYPE, msg)
+
+        # Reject image files when no vision-capable model is loaded
         source_type = (ext or "").lstrip(".")
+        if source_type in ("png", "jpg", "jpeg", "tiff", "tif") and not settings.extract.vision_model_present:
+            msg = (
+                f"Image extraction is not available: the configured model does not support vision. "
+                f"File at index {idx} ({filename!r}) requires a vision-capable model."
+            )
+            logger.error(msg)
+            APIError.raise_error(ErrorCode.UNSUPPORTED_FILE_TYPE, msg)
+
         validated.append((file.filename, source_type))
 
     # Duplicate filename check
