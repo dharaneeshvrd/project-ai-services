@@ -15,6 +15,7 @@ Responsibilities:
 import json
 import re
 import copy
+import time
 from datetime import timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -38,11 +39,20 @@ logger = get_logger("schema_utils")
 prompt_overhead_tokens: int = 0
 
 
+# Backoff settings for the LLM-warmup retry loop in
+# calculate_prompt_overhead_tokens.  Each attempt sleeps for
+# min(initial * multiplier^n, cap) seconds before the next try.
+_WARMUP_INITIAL_DELAY: float = 2.0
+_WARMUP_BACKOFF_MULTIPLIER: float = 2.0
+_WARMUP_MAX_DELAY: float = 30.0
+
+
 def calculate_prompt_overhead_tokens(llm_endpoint: str) -> None:
-    """
-    Tokenise the fixed prompt scaffold with all variable placeholders replaced
-    by empty strings, and store the result in the module-level
-    ``prompt_overhead_tokens``.
+    """Tokenise the fixed prompt scaffold and store the token count.
+
+    Retries indefinitely with exponential backoff until the LLM endpoint
+    becomes reachable (model warmup).  Logs the cumulative wait time so
+    operators can see exactly how long the model took to come up.
 
     Call this once during service startup after ``create_llm_session()`` and
     ``initialize_models()`` have completed.
@@ -53,8 +63,32 @@ def calculate_prompt_overhead_tokens(llm_endpoint: str) -> None:
         normalized_json_schema="", few_shot_block="", input_text=""
     )
     scaffold_text = system_scaffold + "\n" + user_scaffold
-    prompt_overhead_tokens = _tokenize(scaffold_text, llm_endpoint)
-    logger.info(f"Computed prompt_overhead_tokens={prompt_overhead_tokens}")
+
+    t_start = time.monotonic()
+    attempt = 0
+    delay = _WARMUP_INITIAL_DELAY
+
+    while True:
+        try:
+            prompt_overhead_tokens = _tokenize(scaffold_text, llm_endpoint)
+            elapsed = time.monotonic() - t_start
+            if attempt > 0:
+                logger.info(
+                    f"LLM ready after {elapsed:.1f}s ({attempt} warmup attempt(s)). "
+                    f"prompt_overhead_tokens={prompt_overhead_tokens}"
+                )
+            else:
+                logger.info(f"Computed prompt_overhead_tokens={prompt_overhead_tokens}")
+            return
+        except Exception as exc:
+            elapsed = time.monotonic() - t_start
+            logger.warning(
+                f"LLM not ready yet (attempt {attempt + 1}, {elapsed:.1f}s elapsed): {exc}. "
+                f"Retrying in {delay:.0f}s..."
+            )
+            time.sleep(delay)
+            delay = min(delay * _WARMUP_BACKOFF_MULTIPLIER, _WARMUP_MAX_DELAY)
+            attempt += 1
 
 
 

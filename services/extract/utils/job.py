@@ -29,6 +29,10 @@ from extract.utils.schema import (
     check_extraction_budget,
     compute_reserved_output,
 )
+from extract.utils.vision import (
+    IMAGE_EXTENSIONS,
+    build_vision_messages,
+)
 from extract.utils.vllm import (
     build_messages,
     call_vllm_safe,
@@ -38,7 +42,7 @@ from extract.utils.vllm import (
 
 logger = get_logger("job_utils")
 
-ALLOWED_EXTENSIONS = {".txt", ".md"}
+ALLOWED_EXTENSIONS = {".txt", ".md", ".png", ".jpg", ".jpeg", ".tiff", ".tif"}
 
 
 class JobStatus(str, Enum):
@@ -263,7 +267,10 @@ def validate_and_resolve_file(file: UploadFile) -> tuple[str, str]:
     is_valid, ext = validate_file_extension(filename)
     if not is_valid:
         raw_ext = os.path.splitext(filename)[1] or "unknown"
-        msg = f"Only .txt and .md files are accepted. Received: {raw_ext}"
+        msg = (
+            f"Only .txt, .md, .png, .jpg, and .tiff files are accepted. "
+            f"Received: {raw_ext}"
+        )
         logger.error(msg)
         APIError.raise_error(ErrorCode.UNSUPPORTED_FILE_TYPE, msg)
     return filename, (ext or "").lstrip(".")
@@ -294,15 +301,39 @@ MAX_PROBE_BYTES = 8192
 
 
 async def validate_file_content(file: UploadFile) -> None:
-    """Validate that an uploaded file is a genuine text file.
+    """Validate an uploaded file's content.
+
+    For image files (.png/.jpg/.tiff) only an emptiness check is performed —
+    binary content checks are skipped because image bytes are intentionally
+    non-UTF-8.
+
+    For text files (.txt/.md) the full suite of gates runs:
+      1. Non-empty
+      2. Valid UTF-8
+      3. No null bytes
+      4. Low control-character ratio
+      5. Not a disguised PDF
 
     Reads only the first 8 KB, then resets the file pointer.
     Raises HTTPException on any content validation failure.
     """
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    is_image = ext in IMAGE_EXTENSIONS
+
     probe = await file.read(MAX_PROBE_BYTES)
     await file.seek(0)
 
-    if not probe or not probe.strip():
+    if not probe:
+        msg = "File is empty."
+        logger.error(f"Content validation failed for {file.filename}: {msg}")
+        APIError.raise_error(ErrorCode.INVALID_FILE_CONTENT, msg)
+
+    # Image files: only the emptiness gate applies
+    if is_image:
+        return
+
+    # Text-file gates ────────────────────────────────────────────────────────
+    if not probe.strip():
         msg = "File is empty."
         logger.error(f"Content validation failed for {file.filename}: {msg}")
         APIError.raise_error(ErrorCode.INVALID_FILE_CONTENT, msg)
@@ -330,7 +361,6 @@ async def validate_file_content(file: UploadFile) -> None:
         APIError.raise_error(ErrorCode.INVALID_FILE_CONTENT, msg)
     # Gate 4: reject text files that are actually PDFs
     if probe[:4] == b"%PDF":
-        ext = os.path.splitext(file.filename or "")[1].lower()
         msg = f"File has {ext} extension but contains PDF content."
         logger.error(f"Content validation failed for {file.filename}: {msg}")
         APIError.raise_error(ErrorCode.INVALID_FILE_CONTENT, msg)
@@ -351,13 +381,21 @@ async def process_file(
 ) -> None:
     """Run the full extraction pipeline for one file.
 
-    Updates the document row in the DB at each stage transition.  Never
-    raises — failures are recorded on the document row so the batch can
+    The only branch is message preparation:
+      - Image files (.png/.jpg/.tiff): embed as base64 data-URL via
+        ``build_vision_messages``; skip tokenisation and budget check.
+      - Text files (.txt/.md): read → tokenise → budget-check → ``build_messages``.
+
+    After that, a single shared pipeline handles the LLM call, length-retry,
+    schema validation, result write, and DB update for both file types.
+
+    Never raises — failures are recorded on the document row so the batch can
     continue with subsequent files.
     """
     from extract import state
 
     t_doc_start = time.monotonic()
+    _is_image = Path(staged_path.name).suffix.lower() in IMAGE_EXTENSIONS
 
     async with state.parallel_file_limiter:
         db_repo.update_document(
@@ -367,86 +405,113 @@ async def process_file(
         )
 
         try:
-            # ── reading ───────────────────────────────────────────────
-            try:
-                text = staged_path.read_bytes().decode("utf-8")
-            except UnicodeDecodeError as exc:
-                logger.error(f"UTF-8 decode failed for doc {doc_id}: {exc}")
-                db_repo.update_document(
-                    doc_id=doc_id,
-                    status=DocumentStatus.FAILED,
-                    error="File could not be decoded as UTF-8.",
-                    completed_at=datetime.now(timezone.utc),
-                )
-                return
-            except Exception as exc:
-                logger.error(f"Read failed for doc {doc_id}: {exc}")
-                db_repo.update_document(
-                    doc_id=doc_id,
-                    status=DocumentStatus.FAILED,
-                    error=f"Failed to read staged file: {exc}",
-                    completed_at=datetime.now(timezone.utc),
-                )
-                return
-
-            input_word_count = len(text.split())
-
-            # ── tokenizing ────────────────────────────────────────────
-            try:
-                input_tokens: int = await asyncio.to_thread(
-                    _tokenize, text, llm_endpoint
-                )
-            except Exception as exc:
-                logger.error(f"Tokenization failed for doc {doc_id}: {exc}", exc_info=True)
-                db_repo.update_document(
-                    doc_id=doc_id,
-                    status=DocumentStatus.FAILED,
-                    error="Failed to tokenise the input text.",
-                    completed_at=datetime.now(timezone.utc),
-                )
-                return
-
-            db_repo.update_document(doc_id=doc_id, input_tokens=input_tokens, word_count=input_word_count)
-
-            try:
-                reserved_output = check_extraction_budget(
-                    input_tokens=input_tokens,
-                    schema_tokens=schema_row.schema_tokens,
-                    examples_tokens=schema_row.examples_tokens,
-                    custom_prompt_tokens=schema_row.custom_prompt_tokens,
-                    max_model_len=max_model_len,
-                )
-            except HTTPException as exc:
-                error_msg = (exc.detail.get("error", {}).get("message", str(exc.detail))
-                             if isinstance(exc.detail, dict) else str(exc.detail))
-                db_repo.update_document(
-                    doc_id=doc_id,
-                    status=DocumentStatus.FAILED,
-                    error=error_msg,
-                    completed_at=datetime.now(timezone.utc),
-                    metadata={
-                        "token_diagnostics": {
-                            "input_tokens": input_tokens,
-                            "schema_tokens": schema_row.schema_tokens,
-                            "context_limit_exceeded": True,
-                        }
-                    },
-                )
-                return
-
-            # ── extracting ────────────────────────────────────────────
+            # =================================================================
+            # STEP 1 — build messages (only divergence between image and text)
+            # =================================================================
             few_shot_block = render_few_shot_block(schema_row.examples)
-            messages = build_messages(
-                normalized_schema=schema_row.json_schema,
-                few_shot_block=few_shot_block,
-                input_text=text,
-                custom_prompt=schema_row.custom_prompt,
-            )
+            input_tokens: Optional[int] = None
+            input_word_count: Optional[int] = None
 
+            if _is_image:
+                try:
+                    messages = build_vision_messages(
+                        image_path=staged_path,
+                        normalized_schema=schema_row.json_schema,
+                        few_shot_block=few_shot_block,
+                        custom_prompt=schema_row.custom_prompt,
+                    )
+                except Exception as exc:
+                    logger.error(f"Failed to build vision messages for doc {doc_id}: {exc}")
+                    db_repo.update_document(
+                        doc_id=doc_id,
+                        status=DocumentStatus.FAILED,
+                        error=f"Failed to prepare image for extraction: {exc}",
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    return
+                reserved_output = compute_reserved_output(
+                    schema_row.schema_tokens,
+                    output_token_factor=settings.extract.output_token_factor,
+                )
+            else:
+                try:
+                    text = staged_path.read_bytes().decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    logger.error(f"UTF-8 decode failed for doc {doc_id}: {exc}")
+                    db_repo.update_document(
+                        doc_id=doc_id,
+                        status=DocumentStatus.FAILED,
+                        error="File could not be decoded as UTF-8.",
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    return
+                except Exception as exc:
+                    logger.error(f"Read failed for doc {doc_id}: {exc}")
+                    db_repo.update_document(
+                        doc_id=doc_id,
+                        status=DocumentStatus.FAILED,
+                        error=f"Failed to read staged file: {exc}",
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    return
+
+                input_word_count = len(text.split())
+                try:
+                    input_tokens = await asyncio.to_thread(_tokenize, text, llm_endpoint)
+                except Exception as exc:
+                    logger.error(f"Tokenization failed for doc {doc_id}: {exc}", exc_info=True)
+                    db_repo.update_document(
+                        doc_id=doc_id,
+                        status=DocumentStatus.FAILED,
+                        error="Failed to tokenise the input text.",
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    return
+
+                db_repo.update_document(
+                    doc_id=doc_id, input_tokens=input_tokens, word_count=input_word_count
+                )
+
+                try:
+                    reserved_output = check_extraction_budget(
+                        input_tokens=input_tokens,
+                        schema_tokens=schema_row.schema_tokens,
+                        examples_tokens=schema_row.examples_tokens,
+                        custom_prompt_tokens=schema_row.custom_prompt_tokens,
+                        max_model_len=max_model_len,
+                    )
+                except HTTPException as exc:
+                    error_msg = (exc.detail.get("error", {}).get("message", str(exc.detail))
+                                 if isinstance(exc.detail, dict) else str(exc.detail))
+                    db_repo.update_document(
+                        doc_id=doc_id,
+                        status=DocumentStatus.FAILED,
+                        error=error_msg,
+                        completed_at=datetime.now(timezone.utc),
+                        metadata={
+                            "token_diagnostics": {
+                                "input_tokens": input_tokens,
+                                "schema_tokens": schema_row.schema_tokens,
+                                "context_limit_exceeded": True,
+                            }
+                        },
+                    )
+                    return
+
+                messages = build_messages(
+                    normalized_schema=schema_row.json_schema,
+                    few_shot_block=few_shot_block,
+                    input_text=text,
+                    custom_prompt=schema_row.custom_prompt,
+                )
+
+            # =================================================================
+            # STEP 2 — LLM call  (shared)
+            # =================================================================
             t_extract_start = time.monotonic()
             try:
                 async with concurrency_limiter:
-                    vllm_resp = await call_vllm_safe(
+                    llm_resp = await call_vllm_safe(
                         messages, reserved_output, schema_row.json_schema,
                         llm_endpoint, llm_model,
                     )
@@ -461,12 +526,12 @@ async def process_file(
                 )
                 return
 
-            choices = vllm_resp.get("choices", [])
+            choices = llm_resp.get("choices", [])
             if not choices:
                 db_repo.update_document(
                     doc_id=doc_id,
                     status=DocumentStatus.FAILED,
-                    error="vLLM returned an empty choices list.",
+                    error="LLM returned an empty choices list.",
                     completed_at=datetime.now(timezone.utc),
                 )
                 return
@@ -488,7 +553,7 @@ async def process_file(
                 )
                 try:
                     async with concurrency_limiter:
-                        vllm_resp = await call_vllm_safe(
+                        llm_resp = await call_vllm_safe(
                             messages, boosted_reserved_output, schema_row.json_schema,
                             llm_endpoint, llm_model,
                         )
@@ -503,12 +568,12 @@ async def process_file(
                     )
                     return
 
-                choices = vllm_resp.get("choices", [])
+                choices = llm_resp.get("choices", [])
                 if not choices:
                     db_repo.update_document(
                         doc_id=doc_id,
                         status=DocumentStatus.FAILED,
-                        error="vLLM returned an empty choices list.",
+                        error="LLM returned an empty choices list.",
                         completed_at=datetime.now(timezone.utc),
                     )
                     return
@@ -537,11 +602,13 @@ async def process_file(
             t_extract_secs = time.monotonic() - t_extract_start
 
             raw_output: str = choice.get("message", {}).get("content", "") or ""
-            usage = vllm_resp.get("usage", {})
+            usage = llm_resp.get("usage", {})
             total_prompt_tokens: int = usage.get("prompt_tokens", 0)
             total_completion_tokens: int = usage.get("completion_tokens", 0)
 
-            # ── validating ────────────────────────────────────────────
+            # =================================================================
+            # STEP 3 — schema validation + one correction retry  (shared)
+            # =================================================================
             t_validate_start = time.monotonic()
             try:
                 parsed_output, validation_attempts, extra_pt, extra_ct = (
@@ -565,12 +632,14 @@ async def process_file(
             total_prompt_tokens += extra_pt
             total_completion_tokens += extra_ct
 
-            # ── writing ───────────────────────────────────────────────
+            # =================================================================
+            # STEP 4 — write result file  (shared)
+            # =================================================================
             result_dir = settings.extract.results_dir / job_id
             result_path = result_dir / f"{doc_id}_result.json"
             try:
                 result_dir.mkdir(parents=True, exist_ok=True)
-                result_path.write_text(json.dumps( parsed_output), encoding="utf-8")
+                result_path.write_text(json.dumps(parsed_output), encoding="utf-8")
             except Exception as exc:
                 logger.error(
                     f"Failed to write result for doc {doc_id} in job {job_id}: {exc}",
@@ -584,27 +653,37 @@ async def process_file(
                 )
                 return
 
+            # =================================================================
+            # STEP 5 — mark completed  (shared; token_diagnostics differ slightly)
+            # =================================================================
+            token_diagnostics: dict = {
+                "schema_tokens": schema_row.schema_tokens,
+                "reserved_output_tokens": reserved_output,
+                "max_tokens_adjusted": max_tokens_adjusted,
+            }
+            if input_tokens is not None:
+                token_diagnostics["input_tokens"] = input_tokens
+
             db_repo.update_document(
                 doc_id=doc_id,
                 status=DocumentStatus.COMPLETED,
                 completed_at=datetime.now(timezone.utc),
                 usage_input_tokens=total_prompt_tokens,
                 usage_output_tokens=total_completion_tokens,
+                word_count=input_word_count,
                 metadata={
-                    "token_diagnostics": {
-                        "input_tokens": input_tokens,
-                        "schema_tokens": schema_row.schema_tokens,
-                        "reserved_output_tokens": reserved_output,
-                        "max_tokens_adjusted": max_tokens_adjusted,
-                    },
+                    "token_diagnostics": token_diagnostics,
                     "timing_in_secs": {
                         "extracting": round(t_extract_secs, 3),
                         "validating": round(t_validate_secs, 3),
                     },
                     "validation": {"attempts": validation_attempts},
+                    **({"source": "image"} if _is_image else {}),
                 },
             )
-            logger.info(f"Doc {doc_id} completed in {int((time.monotonic() - t_doc_start) * 1000)} ms")
+            logger.info(
+                f"Doc {doc_id} completed in {int((time.monotonic() - t_doc_start) * 1000)} ms"
+            )
 
         except Exception as exc:
             logger.error(
