@@ -568,7 +568,7 @@ class TestImageExtractionIntegration:
     and filesystem writes).  Uses a real base64-encoded minimal JPEG."""
 
     def test_end_to_end_invoice_image(self):
-        """Full pipeline: image → build_vision_messages → call_vision_safe →
+        """Full pipeline: image → build_vision_messages → call_vllm →
         validate_with_retry → write result.  Only the HTTP call and filesystem
         writes are mocked."""
         from extract.utils.job import process_file

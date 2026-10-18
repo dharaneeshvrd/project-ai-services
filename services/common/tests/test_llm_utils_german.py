@@ -68,7 +68,7 @@ class TestQueryVLLMPayloadGermanSupport:
         assert messages[0]["content"] == DE_SYSTEM_PROMPT
         
         # Verify German query system prompt is used
-        assert any("Sitzungssprache: Deutsch" in msg["content"] for msg in messages if msg["role"] == "system")
+        assert any("Sitzungssprache: Deutsch" in msg["content"] for msg in messages if msg["role"] == "user")
     
     @patch('common.llm_utils.resolve_model_max_len')
     @patch('chatbot.settings.get_rag_language_config')
@@ -108,7 +108,7 @@ class TestQueryVLLMPayloadGermanSupport:
         assert messages[0]["content"] == EN_SYSTEM_PROMPT
         
         # Verify English query system prompt is used
-        assert any("Session language: English" in msg["content"] for msg in messages if msg["role"] == "system")
+        assert any("Session language: English" in msg["content"] for msg in messages if msg["role"] == "user")
     
     @patch('common.llm_utils.resolve_model_max_len')
     @patch('chatbot.settings.get_rag_language_config')
@@ -190,7 +190,7 @@ class TestQueryVLLMPayloadGermanSupport:
         messages = payload["messages"]
         query_system_msg = None
         for msg in messages:
-            if msg["role"] == "system" and "Sitzungssprache: Deutsch" in msg["content"]:
+            if msg["role"] == "user" and "Sitzungssprache: Deutsch" in msg["content"]:
                 query_system_msg = msg
                 break
         
