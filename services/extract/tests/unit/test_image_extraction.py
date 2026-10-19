@@ -183,13 +183,17 @@ def _standard_vlm_patches(
     if validate_return is None:
         validate_return = (VALID_EXTRACTION, 1, 0, 0)
 
+    # call_vllm_with_length_retry returns (raw_str, usage_dict, reserved_int)
+    raw_str = vlm_response.get("choices", [{}])[0].get("message", {}).get("content", "") if vlm_response.get("choices") else ""
+    usage = vlm_response.get("usage", {})
+
     return {
         "extract.state.parallel_file_limiter": _make_async_cm_mock(),
         "extract.utils.job.concurrency_limiter": _make_async_cm_mock(),
         "extract.utils.job.db_repo.update_document": Mock(),
         "extract.utils.job.render_few_shot_block": Mock(return_value=""),
         "extract.utils.job.build_vision_messages": Mock(return_value=[{"role": "user", "content": [...]}]),
-        "extract.utils.job.call_vllm_safe": AsyncMock(return_value=vlm_response),
+        "extract.utils.job.call_vllm_with_length_retry": AsyncMock(return_value=(raw_str, usage, 512)),
         "extract.utils.job.validate_with_retry": AsyncMock(return_value=validate_return),
         "extract.utils.job.compute_reserved_output": Mock(return_value=512),
         "extract.utils.job.settings": _make_default_settings_mock(),
@@ -431,20 +435,13 @@ class TestVlmBranchMessageBuildFailure:
 class TestVlmBranchCallFailures:
     def test_vlm_connection_error_marks_doc_failed(self):
         p = _standard_vlm_patches()
-        p["extract.utils.job.call_vllm_safe"] = AsyncMock(
+        p["extract.utils.job.call_vllm_with_length_retry"] = AsyncMock(
             side_effect=_http_exc("LLM_UNAVAILABLE", "unreachable", 503)
         )
         update_mock = _run_vlm_process_file(p)
         last_kwargs = update_mock.call_args_list[-1].kwargs
         assert last_kwargs.get("status") == "failed"
         assert "unreachable" in last_kwargs.get("error", "")
-
-    def test_vlm_empty_choices_marks_doc_failed(self):
-        p = _standard_vlm_patches(vlm_response={"choices": [], "usage": {}})
-        update_mock = _run_vlm_process_file(p)
-        last_kwargs = update_mock.call_args_list[-1].kwargs
-        assert last_kwargs.get("status") == "failed"
-        assert "empty choices" in last_kwargs.get("error", "")
 
     def test_vlm_validation_failure_marks_doc_failed(self):
         p = _standard_vlm_patches()
@@ -457,24 +454,31 @@ class TestVlmBranchCallFailures:
 
 
 class TestVlmBranchLengthRetry:
-    def test_length_retry_succeeds_with_boosted_budget(self):
-        """finish_reason=length on first call → retries and succeeds."""
+    """Length-retry logic lives inside call_vllm_with_length_retry (vllm.py).
+
+    At the job.py level we verify that:
+    - a boosted reserved_output returned by the helper sets max_tokens_adjusted
+    - HTTPException(413) from the helper marks the doc failed with "truncated"
+    """
+
+    def test_boosted_reserved_output_sets_max_tokens_adjusted(self):
+        """Helper returning a larger budget than initial sets max_tokens_adjusted."""
+        usage = {"prompt_tokens": 300, "completion_tokens": 60}
         p = _standard_vlm_patches()
-        p["extract.utils.job.call_vllm_safe"] = AsyncMock(
-            side_effect=[
-                _vlm_response(VALID_EXTRACTION_JSON, finish_reason="length"),
-                _vlm_response(VALID_EXTRACTION_JSON, finish_reason="stop"),
-            ]
+        p["extract.utils.job.call_vllm_with_length_retry"] = AsyncMock(
+            return_value=(VALID_EXTRACTION_JSON, usage, 768)  # > initial 512
         )
         update_mock = _run_vlm_process_file(p)
         last_kwargs = update_mock.call_args_list[-1].kwargs
         assert last_kwargs.get("status") == "completed"
+        diag = last_kwargs.get("metadata", {}).get("token_diagnostics", {})
+        assert diag.get("max_tokens_adjusted") is True
 
     def test_length_still_on_retry_marks_doc_failed(self):
-        """finish_reason=length on both calls → truncation error."""
+        """HTTPException(413) from helper (truncated) marks doc failed."""
         p = _standard_vlm_patches()
-        p["extract.utils.job.call_vllm_safe"] = AsyncMock(
-            return_value=_vlm_response(VALID_EXTRACTION_JSON, finish_reason="length")
+        p["extract.utils.job.call_vllm_with_length_retry"] = AsyncMock(
+            side_effect=_http_exc("CONTEXT_LIMIT_EXCEEDED", "output was truncated", 413)
         )
         update_mock = _run_vlm_process_file(p)
         last_kwargs = update_mock.call_args_list[-1].kwargs
@@ -623,7 +627,13 @@ class TestImageExtractionIntegration:
              patch("extract.utils.job.concurrency_limiter", _make_async_cm_mock()), \
              patch("extract.utils.job.db_repo.update_document", update_doc_mock), \
              patch("extract.utils.job.render_few_shot_block", return_value=""), \
-             patch("extract.utils.job.call_vllm_safe", new=AsyncMock(return_value=vlm_raw_response)), \
+             patch("extract.utils.job.call_vllm_with_length_retry", new=AsyncMock(
+                 return_value=(
+                     json.dumps(expected_extraction),
+                     vlm_raw_response.get("usage", {}),
+                     512,
+                 )
+             )), \
              patch("extract.utils.job.validate_with_retry",
                    new=AsyncMock(return_value=(expected_extraction, 1, 0, 0))), \
              patch("extract.utils.job.compute_reserved_output", return_value=512), \

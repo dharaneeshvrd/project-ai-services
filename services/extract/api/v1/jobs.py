@@ -9,9 +9,11 @@ Exposes one router:
 import asyncio
 import json
 import os
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -36,7 +38,7 @@ from extract.settings import settings
 from extract.utils.request import check_request_body_size
 from extract.utils.vllm import (
     build_messages,
-    call_vllm_safe,
+    call_vllm_with_length_retry,
     render_few_shot_block,
     validate_with_retry,
 )
@@ -56,6 +58,7 @@ from extract.utils.job import (
     stage_uploaded_file,
     validate_file_extension,
 )
+from extract.utils.vision import IMAGE_EXTENSIONS, build_vision_messages
 from extract.utils.schema import (
     SchemaValidationError,
     _tokenize,
@@ -104,197 +107,332 @@ def _resolve_schema_name(schema_name: str):
     tags=["extraction"],
     summary="Synchronous extraction",
     description=(
-        "Extract structured data from plain text against a registered schema in a "
-        "single blocking call.  Returns validated, schema-conformant JSON.\n\n"
+        "Extract structured data in a single blocking call. Returns validated, "
+        "schema-conformant JSON.\n\n"
+        "Accepts **either** `application/json` **or** `multipart/form-data` based "
+        "on the `Content-Type` header.\n\n"
+        "---\n\n"
+        "### Option 1 — plain text (`Content-Type: application/json`)\n\n"
+        "| Field | Type | Required | Description |\n"
+        "|-------|------|----------|-------------|\n"
+        "| `text` | string | Yes | Raw text to extract from |\n"
+        "| `schema_id` / `schema_name` / `json_schema` / `json_example` | — | one required | Schema source |\n\n"
+        "---\n\n"
+        "### Option 2 — image file (`Content-Type: multipart/form-data`)\n\n"
+        "Accepted: `.png`, `.jpg`, `.tiff`. Requires a vision-capable model (returns 415 otherwise).\n\n"
+        "| Field | Type | Required | Description |\n"
+        "|-------|------|----------|-------------|\n"
+        "| `file` | file | Yes | Image file to extract from |\n"
+        "| `schema_id` / `schema_name` / `json_schema` / `json_example` | — | one required | Schema source |\n\n"
+        "\n"
     ),
     responses={
         400: http_error_responses[400],
         404: http_error_responses[404],
         413: http_error_responses[413],
+        415: http_error_responses[415],
         422: http_error_responses[422],
         429: http_error_responses[429],
         500: http_error_responses[500],
         503: http_error_responses[503],
     },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["text"],
+                        "properties": {
+                            "text": {"type": "string", "description": "Raw text to extract from"},
+                            "schema_id": {"type": "string", "nullable": True},
+                            "schema_name": {"type": "string", "nullable": True},
+                            "json_schema": {"type": "object", "nullable": True},
+                            "json_example": {"type": "object", "nullable": True},
+                        },
+                    }
+                },
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["file"],
+                        "properties": {
+                            "file": {
+                                "type": "string",
+                                "format": "binary",
+                                "description": "Image file (.png / .jpg / .tiff)",
+                            },
+                            "schema_id": {"type": "string", "nullable": True},
+                            "schema_name": {"type": "string", "nullable": True},
+                            "json_schema": {
+                                "type": "string",
+                                "nullable": True,
+                                "description": "Ephemeral JSON Schema as a JSON string",
+                            },
+                            "json_example": {
+                                "type": "string",
+                                "nullable": True,
+                                "description": "Ephemeral example as a JSON string",
+                            },
+                        },
+                    }
+                },
+            },
+        }
+    },
     include_in_schema=True,
 )
-async def extract_sync(request: Request, body: ExtractionRequest) -> JSONResponse:
-    """Synchronous entity extraction — blocking call with schema-validated JSON output."""
+async def extract_sync(request: Request) -> JSONResponse:
+    """Synchronous entity extraction.
+
+    Dispatches on Content-Type:
+    - ``application/json``    → text path (existing behaviour, unchanged)
+    - ``multipart/form-data`` → image path via vision LLM
+    """
     t_start = time.monotonic()
+    content_type = request.headers.get("content-type", "")
 
-    # ------------------------------------------------------------------
-    # 0. Request-body size guard — before any parsing or tokenisation
-    # ------------------------------------------------------------------
-    await check_request_body_size(request)
-
-    # ------------------------------------------------------------------
-    # 1. Basic field validation
-    # ------------------------------------------------------------------
-    if not body.text.strip():
-        APIError.raise_error(ErrorCode.INVALID_REQUEST, "text field is empty")
-
-    llm_model_dict = get_llm_endpoint()
-    llm_endpoint: str = llm_model_dict.get("llm_endpoint", "")
-    llm_model: str = llm_model_dict.get("llm_model", "")
-    max_model_len: int = llm_model_dict.get('max_model_len', "")
-
-    try:
-        schema_row = resolve_schema_input(
-            schema_id=body.schema_id,
-            schema_name=body.schema_name,
-            json_schema=body.json_schema,
-            json_example=body.json_example,
-            llm_endpoint=llm_endpoint,
-        )
-    except SchemaValidationError as exc:
-        logger.error("Schema validation error: %s", exc)
-        APIError.raise_error(ErrorCode.INVALID_SCHEMA, str(exc))
-
-    # ------------------------------------------------------------------
-    # 2. Semaphore check (non-blocking — reject immediately if saturated)
-    # ------------------------------------------------------------------
+    # Shared: concurrency guard + LLM endpoint
     if concurrency_limiter.locked():
         msg = "Server is at maximum vLLM concurrency. Please retry later."
         logger.error(msg)
         APIError.raise_error(ErrorCode.RATE_LIMIT_EXCEEDED, msg)
 
+    llm_model_dict = get_llm_endpoint()
+    llm_endpoint: str = llm_model_dict.get("llm_endpoint", "")
+    llm_model: str = llm_model_dict.get("llm_model", "")
+    max_model_len: int = llm_model_dict.get("max_model_len", "")
 
-    # ------------------------------------------------------------------
-    # 3–8. Core extraction
-    #       One semaphore slot held across BOTH the initial call and the
-    #       validation retry so a second attempt cannot be starved.
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # PATH A — plain text  (application/json)
+    # ==================================================================
+    if "application/json" in content_type:
+        await check_request_body_size(request)
 
+        try:
+            raw_body = await request.json()
+        except Exception:
+            APIError.raise_error(ErrorCode.INVALID_REQUEST, "Request body is not valid JSON.")
 
-    # ── 3. Exact input token count via /tokenize ─────────────────────
-    try:
-        input_tokens: int = await asyncio.to_thread(
-            _tokenize, body.text, llm_endpoint
-        )
-    except Exception as exc:
-        logger.error(f"Tokenization failed: {exc}", exc_info=True)
-        APIError.raise_error(ErrorCode.LLM_UNAVAILABLE,
-                             "Failed to tokenise the input text. "
-                             "Ensure the vLLM /tokenize endpoint is reachable.")
+        from pydantic import ValidationError as _PydanticValidationError
+        from fastapi.exceptions import RequestValidationError as _RVE
+        try:
+            body = ExtractionRequest(**raw_body)
+        except _PydanticValidationError as exc:
+            raise _RVE(errors=exc.errors(), body=raw_body) from exc
 
-    # ── 4. Hard context-window guard ─────────────────────────────────
-    #       check_extraction_budget raises HTTPException via APIError.raise_error.
-    try:
-        reserved_output = check_extraction_budget(
-            input_tokens=input_tokens,
-            schema_tokens=schema_row.schema_tokens,
-            examples_tokens=schema_row.examples_tokens,
-            custom_prompt_tokens=schema_row.custom_prompt_tokens,
-            max_model_len=max_model_len,
-        )
-    except Exception as e:
-        logger.error(e)
-        raise
-
-    # ── 5. Prompt assembly ────────────────────────────────────────────
-    few_shot_block = render_few_shot_block(schema_row.examples)
-    messages = build_messages(
-        normalized_schema=schema_row.json_schema,
-        few_shot_block=few_shot_block,
-        input_text=body.text,
-        custom_prompt=schema_row.custom_prompt,
-    )
-
-
-    async with concurrency_limiter:
-        # ── 6. First vLLM call ────────────────────────────────────────────
-        vllm_resp = await call_vllm_safe(
-            messages, reserved_output, schema_row.json_schema, llm_endpoint, llm_model
-        )
-
-        choices = vllm_resp.get("choices", [])
-        if not choices:
-            msg = "vLLM returned an empty choices list."
-            logger.error(msg)
-            APIError.raise_error(ErrorCode.LLM_ERROR, msg)
-
-        choice = choices[0]
-        finish_reason: str = choice.get("finish_reason", "")
-
-        # ── 7. Output-budget exceeded — retry once with 1.5× output_token_factor ─
-        if finish_reason == "length":
-            boosted_reserved_output = compute_reserved_output(
-                schema_row.schema_tokens,
-                output_token_factor=1.5 * settings.extract.output_token_factor,
+        try:
+            schema_row = resolve_schema_input(
+                schema_id=body.schema_id,
+                schema_name=body.schema_name,
+                json_schema=body.json_schema,
+                json_example=body.json_example,
+                llm_endpoint=llm_endpoint,
             )
-            logger.warning(
-                "finish_reason=length on first call; retrying with boosted "
-                "reserved_output=%d (was %d)",
-                boosted_reserved_output,
-                reserved_output,
-            )
-            vllm_resp = await call_vllm_safe(
-                messages, boosted_reserved_output, schema_row.json_schema, llm_endpoint, llm_model
-            )
-            choices = vllm_resp.get("choices", [])
-            if not choices:
-                msg = "vLLM returned an empty choices list."
-                logger.error(msg)
-                APIError.raise_error(ErrorCode.LLM_ERROR, msg)
-            choice = choices[0]
-            finish_reason = choice.get("finish_reason", "")
-            if finish_reason == "length":
-                msg = (
-                    "The model output was truncated because it reached the reserved "
-                    "output token limit."
-                )
-                logger.error(f"{msg} (boosted_reserved_output={boosted_reserved_output})")
-                APIError.raise_error(
-                    ErrorCode.CONTEXT_LIMIT_EXCEEDED,
-                    msg,
-                    details={
-                        "reserved_output_tokens": boosted_reserved_output,
-                        "finish_reason": "length",
-                    },
-                )
-            reserved_output = boosted_reserved_output
+        except SchemaValidationError as exc:
+            logger.error("Schema validation error: %s", exc)
+            APIError.raise_error(ErrorCode.INVALID_SCHEMA, str(exc))
 
-        raw_output: str = choice.get("message", {}).get("content", "") or ""
-        usage = vllm_resp.get("usage", {})
-        total_prompt_tokens: int = usage.get("prompt_tokens", 0)
-        total_completion_tokens: int = usage.get("completion_tokens", 0)
+        try:
+            input_tokens: int = await asyncio.to_thread(_tokenize, body.text, llm_endpoint)
+        except Exception as exc:
+            logger.error(f"Tokenization failed: {exc}", exc_info=True)
+            APIError.raise_error(
+                ErrorCode.LLM_UNAVAILABLE,
+                "Failed to tokenise the input text. "
+                "Ensure the vLLM /tokenize endpoint is reachable.",
+            )
 
-        # ── 8. Server-side validation + one bounded retry ─────────────────
-        parsed_output, validation_attempts, extra_pt, extra_ct = await validate_with_retry(
-            raw_output, messages, reserved_output,
-            schema_row.json_schema, llm_endpoint, llm_model,
+        try:
+            reserved_output = check_extraction_budget(
+                input_tokens=input_tokens,
+                schema_tokens=schema_row.schema_tokens,
+                examples_tokens=schema_row.examples_tokens,
+                custom_prompt_tokens=schema_row.custom_prompt_tokens,
+                max_model_len=max_model_len,
+            )
+        except Exception as e:
+            logger.error(e)
+            raise
+
+        few_shot_block = render_few_shot_block(schema_row.examples)
+        messages = build_messages(
+            normalized_schema=schema_row.json_schema,
+            few_shot_block=few_shot_block,
+            input_text=body.text,
+            custom_prompt=schema_row.custom_prompt,
         )
-        total_prompt_tokens += extra_pt
-        total_completion_tokens += extra_ct
 
-    # ------------------------------------------------------------------
-    # 9. Return response
-    # ------------------------------------------------------------------
-    processing_time_ms = int((time.monotonic() - t_start) * 1000)
+        async with concurrency_limiter:
+            raw_output, usage, reserved_output = await call_vllm_with_length_retry(
+                messages, reserved_output, schema_row.schema_tokens,
+                schema_row.json_schema, llm_endpoint, llm_model,
+            )
+            total_prompt_tokens: int = usage.get("prompt_tokens", 0)
+            total_completion_tokens: int = usage.get("completion_tokens", 0)
+            parsed_output, validation_attempts, extra_pt, extra_ct = await validate_with_retry(
+                raw_output, messages, reserved_output,
+                schema_row.json_schema, llm_endpoint, llm_model,
+            )
+            total_prompt_tokens += extra_pt
+            total_completion_tokens += extra_ct
 
-    return JSONResponse(
-        status_code=200,
-        content={
-            "data": {
-                "extraction": parsed_output,
-                "schema_id": schema_row.schema_id,
-                "source": {
-                    "input_type": "text",
-                    "input_tokens": input_tokens,
+        processing_time_ms = int((time.monotonic() - t_start) * 1000)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "data": {
+                    "extraction": parsed_output,
+                    "schema_id": schema_row.schema_id,
+                    "source": {"input_type": "text", "input_tokens": input_tokens},
+                },
+                "meta": {
+                    "model": llm_model,
+                    "processing_time_ms": processing_time_ms,
+                    "validation_attempts": validation_attempts,
+                },
+                "usage": {
+                    "input_tokens": total_prompt_tokens,
+                    "output_tokens": total_completion_tokens,
+                    "total_tokens": total_prompt_tokens + total_completion_tokens,
                 },
             },
-            "meta": {
-                "model": llm_model,
-                "processing_time_ms": processing_time_ms,
-                "validation_attempts": validation_attempts,
+        )
+
+    # ==================================================================
+    # PATH B — image file  (multipart/form-data)
+    # ==================================================================
+    elif "multipart/form-data" in content_type:
+        form = await request.form()
+        file: Optional[UploadFile] = form.get("file")  # type: ignore[assignment]
+
+        if not file or not hasattr(file, "filename"):
+            APIError.raise_error(ErrorCode.INVALID_REQUEST, "A file upload is required.")
+
+        filename: str = file.filename or ""
+        ext = os.path.splitext(filename)[1].lower()
+
+        if ext not in IMAGE_EXTENSIONS:
+            APIError.raise_error(
+                ErrorCode.UNSUPPORTED_FILE_TYPE,
+                f"Only .png, .jpg, and .tiff files are accepted. Received: {ext or 'unknown'}",
+            )
+
+        if not settings.extract.vision_model_present:
+            APIError.raise_error(
+                ErrorCode.UNSUPPORTED_FILE_TYPE,
+                "Image extraction is not available: the configured model does not support vision.",
+            )
+
+        image_bytes = await file.read()
+        if not image_bytes:
+            APIError.raise_error(ErrorCode.INVALID_FILE_CONTENT, "The uploaded image file is empty.")
+
+        # Schema params from form fields (json_schema / json_example arrive as strings)
+        schema_id_form: Optional[str] = form.get("schema_id") or None
+        schema_name_form: Optional[str] = form.get("schema_name") or None
+        json_schema_str: Optional[str] = form.get("json_schema") or None
+        json_example_str: Optional[str] = form.get("json_example") or None
+
+        json_schema_dict: Optional[dict] = None
+        if json_schema_str:
+            try:
+                json_schema_dict = json.loads(json_schema_str)
+            except json.JSONDecodeError as exc:
+                APIError.raise_error(ErrorCode.INVALID_REQUEST, f"json_schema is not valid JSON: {exc}")
+
+        json_example_dict: Optional[dict] = None
+        if json_example_str:
+            try:
+                json_example_dict = json.loads(json_example_str)
+            except json.JSONDecodeError as exc:
+                APIError.raise_error(ErrorCode.INVALID_REQUEST, f"json_example is not valid JSON: {exc}")
+
+        try:
+            schema_row = resolve_schema_input(
+                schema_id=schema_id_form,
+                schema_name=schema_name_form,
+                json_schema=json_schema_dict,
+                json_example=json_example_dict,
+                llm_endpoint=llm_endpoint,
+            )
+        except SchemaValidationError as exc:
+            logger.error("Schema validation error: %s", exc)
+            APIError.raise_error(ErrorCode.INVALID_SCHEMA, str(exc))
+
+        # Write to a temp file so build_vision_messages can read_bytes() with the right suffix
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(image_bytes)
+            tmp_path = Path(tmp.name)
+
+        try:
+            few_shot_block = render_few_shot_block(schema_row.examples)
+            try:
+                messages = build_vision_messages(
+                    image_path=tmp_path,
+                    normalized_schema=schema_row.json_schema,
+                    few_shot_block=few_shot_block,
+                    custom_prompt=schema_row.custom_prompt,
+                )
+            except Exception as exc:
+                logger.error(f"Failed to build vision messages: {exc}")
+                APIError.raise_error(
+                    ErrorCode.INVALID_FILE_CONTENT,
+                    f"Failed to prepare image for extraction: {exc}",
+                )
+
+            reserved_output = compute_reserved_output(
+                schema_row.schema_tokens,
+                output_token_factor=settings.extract.output_token_factor,
+            )
+
+            async with concurrency_limiter:
+                raw_output, usage, reserved_output = await call_vllm_with_length_retry(
+                    messages, reserved_output, schema_row.schema_tokens,
+                    schema_row.json_schema, llm_endpoint, llm_model,
+                )
+                total_prompt_tokens = usage.get("prompt_tokens", 0)
+                total_completion_tokens = usage.get("completion_tokens", 0)
+                parsed_output, validation_attempts, extra_pt, extra_ct = await validate_with_retry(
+                    raw_output, messages, reserved_output,
+                    schema_row.json_schema, llm_endpoint, llm_model,
+                )
+                total_prompt_tokens += extra_pt
+                total_completion_tokens += extra_ct
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        processing_time_ms = int((time.monotonic() - t_start) * 1000)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "data": {
+                    "extraction": parsed_output,
+                    "schema_id": schema_row.schema_id,
+                    "source": {"input_type": "image", "filename": filename},
+                },
+                "meta": {
+                    "model": llm_model,
+                    "processing_time_ms": processing_time_ms,
+                    "validation_attempts": validation_attempts,
+                },
+                "usage": {
+                    "input_tokens": total_prompt_tokens,
+                    "output_tokens": total_completion_tokens,
+                    "total_tokens": total_prompt_tokens + total_completion_tokens,
+                },
             },
-            "usage": {
-                "input_tokens": total_prompt_tokens,
-                "output_tokens": total_completion_tokens,
-                "total_tokens": total_prompt_tokens + total_completion_tokens,
-            },
-        },
-    )
+        )
+
+    # ==================================================================
+    # Unknown content-type
+    # ==================================================================
+    else:
+        APIError.raise_error(
+            ErrorCode.UNSUPPORTED_FILE_TYPE,
+            "Content-Type must be application/json or multipart/form-data.",
+        )
 
 
 

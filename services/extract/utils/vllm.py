@@ -14,6 +14,7 @@ from common.misc_utils import get_logger
 from common.error_utils import APIError, ErrorCode
 from extract.settings import settings
 from extract.state import concurrency_limiter
+from extract.utils.schema import compute_reserved_output
 
 logger = get_logger("vllm_utils")
 
@@ -164,6 +165,79 @@ async def call_vllm_safe(
         APIError.raise_error(ErrorCode.LLM_ERROR, f"Unexpected error during LLM call{label}.")
 
 
+async def call_vllm_with_length_retry(
+    messages: List[Dict[str, Any]],
+    reserved_output: int,
+    schema_tokens: int,
+    json_schema: Dict[str, Any],
+    llm_endpoint: str,
+    llm_model: str,
+) -> Tuple[str, Dict[str, Any], int]:
+    """Call vLLM and retry once with a boosted output budget on ``finish_reason=length``.
+
+    Encapsulates the repeated call → empty-choices guard → length-retry →
+    second empty-choices guard → second length-fail pattern that appears in
+    both the sync endpoint and the batch ``process_file`` pipeline.
+
+    Args:
+        messages:        Chat messages for the completion request.
+        reserved_output: Initial output token budget.
+        schema_tokens:   Schema token count used to compute the boosted budget.
+        json_schema:     Normalised JSON schema (for guided decoding).
+        llm_endpoint:    Base URL of the vLLM endpoint.
+        llm_model:       Model name passed in the payload.
+
+    Returns:
+        A 3-tuple of:
+        - ``raw_output``: The raw string content from the chosen completion.
+        - ``usage``:      The ``usage`` dict from the final vLLM response.
+        - ``reserved_output``: The (possibly boosted) token budget that was used.
+
+    Raises:
+        HTTPException(503/500) from :func:`call_vllm_safe` on LLM failure.
+        HTTPException(413)     if output is still truncated after the retry.
+        HTTPException(500)     if either call returns an empty choices list.
+    """
+    resp = await call_vllm_safe(messages, reserved_output, json_schema, llm_endpoint, llm_model)
+
+    choices = resp.get("choices", [])
+    if not choices:
+        APIError.raise_error(ErrorCode.LLM_ERROR, "vLLM returned an empty choices list.")
+
+    choice = choices[0]
+    if choice.get("finish_reason") == "length":
+        boosted = compute_reserved_output(
+            schema_tokens,
+            output_token_factor=1.5 * settings.extract.output_token_factor,
+        )
+        logger.warning(
+            "finish_reason=length; retrying with boosted reserved_output=%d (was %d)",
+            boosted, reserved_output,
+        )
+        resp = await call_vllm_safe(
+            messages, boosted, json_schema, llm_endpoint, llm_model, is_retry=True
+        )
+        choices = resp.get("choices", [])
+        if not choices:
+            APIError.raise_error(ErrorCode.LLM_ERROR, "vLLM returned an empty choices list.")
+        choice = choices[0]
+        if choice.get("finish_reason") == "length":
+            msg = (
+                "The model output was truncated because it reached the reserved "
+                "output token limit."
+            )
+            logger.error(f"{msg} (boosted_reserved_output={boosted})")
+            APIError.raise_error(
+                ErrorCode.CONTEXT_LIMIT_EXCEEDED,
+                msg,
+                details={"reserved_output_tokens": boosted, "finish_reason": "length"},
+            )
+        reserved_output = boosted
+
+    raw_output: str = choice.get("message", {}).get("content", "") or ""
+    return raw_output, resp.get("usage", {}), reserved_output
+
+
 async def validate_with_retry(
     raw_output: str,
     messages: List[Dict[str, str]],
@@ -212,7 +286,6 @@ async def validate_with_retry(
             "content": (
                 "Your previous output failed validation with these errors:\n"
                 f"{first_val_err}\n\n"
-                f"Previous output:\n{raw_output}\n\n"
                 "Return a corrected JSON object that fixes ALL listed errors. "
                 "Output ONLY the JSON."
             ),

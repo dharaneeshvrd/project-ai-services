@@ -35,7 +35,7 @@ from extract.utils.vision import (
 )
 from extract.utils.vllm import (
     build_messages,
-    call_vllm_safe,
+    call_vllm_with_length_retry,
     render_few_shot_block,
     validate_with_retry,
 )
@@ -506,14 +506,15 @@ async def process_file(
                 )
 
             # =================================================================
-            # STEP 2 — LLM call  (shared)
+            # STEP 2 — LLM call + length-retry  (shared)
             # =================================================================
             t_extract_start = time.monotonic()
+            max_tokens_adjusted = False
             try:
                 async with concurrency_limiter:
-                    llm_resp = await call_vllm_safe(
-                        messages, reserved_output, schema_row.json_schema,
-                        llm_endpoint, llm_model,
+                    raw_output, usage, new_reserved = await call_vllm_with_length_retry(
+                        messages, reserved_output, schema_row.schema_tokens,
+                        schema_row.json_schema, llm_endpoint, llm_model,
                     )
             except HTTPException as exc:
                 error_msg = (exc.detail.get("error", {}).get("message", str(exc.detail))
@@ -526,83 +527,12 @@ async def process_file(
                 )
                 return
 
-            choices = llm_resp.get("choices", [])
-            if not choices:
-                db_repo.update_document(
-                    doc_id=doc_id,
-                    status=DocumentStatus.FAILED,
-                    error="LLM returned an empty choices list.",
-                    completed_at=datetime.now(timezone.utc),
-                )
-                return
-
-            choice = choices[0]
-            finish_reason: str = choice.get("finish_reason", "")
-            max_tokens_adjusted = False
-
-            # finish_reason=length → retry once with boosted budget
-            if finish_reason == "length":
-                boosted_reserved_output = compute_reserved_output(
-                    schema_row.schema_tokens,
-                    output_token_factor=1.5 * settings.extract.output_token_factor,
-                )
-                logger.warning(
-                    "finish_reason=length for doc %s; retrying with boosted "
-                    "reserved_output=%d (was %d)",
-                    doc_id, boosted_reserved_output, reserved_output,
-                )
-                try:
-                    async with concurrency_limiter:
-                        llm_resp = await call_vllm_safe(
-                            messages, boosted_reserved_output, schema_row.json_schema,
-                            llm_endpoint, llm_model,
-                        )
-                except HTTPException as exc:
-                    error_msg = (exc.detail.get("error", {}).get("message", str(exc.detail))
-                                 if isinstance(exc.detail, dict) else str(exc.detail))
-                    db_repo.update_document(
-                        doc_id=doc_id,
-                        status=DocumentStatus.FAILED,
-                        error=error_msg,
-                        completed_at=datetime.now(timezone.utc),
-                    )
-                    return
-
-                choices = llm_resp.get("choices", [])
-                if not choices:
-                    db_repo.update_document(
-                        doc_id=doc_id,
-                        status=DocumentStatus.FAILED,
-                        error="LLM returned an empty choices list.",
-                        completed_at=datetime.now(timezone.utc),
-                    )
-                    return
-
-                choice = choices[0]
-                finish_reason = choice.get("finish_reason", "")
-                if finish_reason == "length":
-                    db_repo.update_document(
-                        doc_id=doc_id,
-                        status=DocumentStatus.FAILED,
-                        error="The model output was truncated even after retrying with increased budget.",
-                        completed_at=datetime.now(timezone.utc),
-                        metadata={
-                            "token_diagnostics": {
-                                "reserved_output_tokens": boosted_reserved_output,
-                                "max_tokens_adjusted": True,
-                                "finish_reason": "length",
-                            }
-                        },
-                    )
-                    return
-
-                reserved_output = boosted_reserved_output
+            if new_reserved != reserved_output:
                 max_tokens_adjusted = True
+                reserved_output = new_reserved
 
             t_extract_secs = time.monotonic() - t_extract_start
 
-            raw_output: str = choice.get("message", {}).get("content", "") or ""
-            usage = llm_resp.get("usage", {})
             total_prompt_tokens: int = usage.get("prompt_tokens", 0)
             total_completion_tokens: int = usage.get("completion_tokens", 0)
 
