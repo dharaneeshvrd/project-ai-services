@@ -27,9 +27,14 @@
           "const": "mistralai/Ministral-3-14B-Instruct-2512-BF16",
           "title": "Ministral-3-14B-Instruct-2512-BF16",
           "description": "A 14B-parameter instruction-tuned model from Mistral AI in BF16 precision. Requires 4 Spyre cards (tp=4) using the Spyre 3.6 inference image.\n\n**Model strengths**: Fast inference, strong instruction-following, text-only tasks.\n\n**Supported Languages**: English (primary), French, German, Spanish, Italian, and more."
+        },
+        {
+          "const": "ibm-granite/granite-vision-4.1-4b",
+          "title": "granite-vision-4.1-4b",
+          "description": "A 4b-parameter vision-language model from IBM Granite used for image understanding and document-centric multimodal tasks. In this project, it powers tasks such as image description, visual question answering, and extracting content from images and documents.\n\n**Model strengths**: Strong document and chart understanding, image-to-text extraction, and instruction-following with a compact footprint.\n\n**Supported Languages**: English (primary)."
         }
       ],
-      "default": "google/gemma-4-26B-A4B-it"
+      "default": "ibm-granite/granite-vision-4.1-4b"
     },
     "apiKey": {
       "type": "string",
