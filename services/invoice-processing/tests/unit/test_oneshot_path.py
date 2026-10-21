@@ -140,7 +140,7 @@ def test_logs_at_info(mock_db, tmp_path, caplog):
     assert "completed" in caplog.text
 
 
-@pytest.mark.parametrize("image_name", ["scan.png", "photo.jpg", "doc.tiff"])
+@pytest.mark.parametrize("image_name", ["scan.png", "photo.jpg", "photo.jpeg"])
 @patch("pipeline.oneshot_path.db_manager")
 def test_various_image_formats(mock_db, tmp_path, image_name):
     """run_oneshot_path must handle any image extension without special-casing."""

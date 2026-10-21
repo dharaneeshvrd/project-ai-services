@@ -20,21 +20,19 @@ def test_detect_input_type_pdf(filename):
     "photo.jpg",
     "photo.JPG",
     "scan.jpeg",
-    "doc.tiff",
-    "SCAN.TIFF",
 ])
 def test_detect_input_type_image(filename):
     assert detect_input_type(filename) == "image"
 
 
-@pytest.mark.parametrize("filename,expected_suffix", [
-    ("invoice.txt", ".txt"),
-    ("data.csv", ".csv"),
-    ("archive.zip", ".zip"),
-    ("image.bmp", ".bmp"),   # not in spec — rejected
-    ("image.webp", ".webp"),
+@pytest.mark.parametrize("filename", [
+    "invoice.txt",
+    "data.csv",
+    "archive.zip",
+    "image.bmp",   # not in spec — rejected
+    "image.webp",
 ])
-def test_detect_input_type_unsupported_raises(filename, expected_suffix):
+def test_detect_input_type_unsupported_raises(filename):
     with pytest.raises(ValueError, match="Unsupported file type"):
         detect_input_type(filename)
 

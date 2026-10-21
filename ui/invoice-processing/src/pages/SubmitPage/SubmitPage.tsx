@@ -23,19 +23,18 @@ import { Upload, Image, Document } from '@carbon/icons-react';
 import { submitInvoice } from '../../services/api';
 
 /** Extensions the backend router accepts — must stay in sync with pipeline/router.py */
-const ACCEPTED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.tiff'];
+const ACCEPTED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg'];
 const ACCEPTED_MIME_TYPES = [
   'application/pdf',
   'image/png',
   'image/jpeg',
-  'image/tiff',
 ];
 
 /** Derive the routing path the backend will use for a given file. */
 function getRoutingPath(file: File): 'One-Shot (image → extract VLM)' | 'PDF path (→ digitize)' | null {
   const ext = `.${file.name.split('.').pop()?.toLowerCase()}`;
   if (ext === '.pdf') return 'PDF path (→ digitize)';
-  if (['.png', '.jpg', '.jpeg', '.tiff'].includes(ext)) return 'One-Shot (image → extract VLM)';
+  if (['.png', '.jpg', '.jpeg'].includes(ext)) return 'One-Shot (image → extract VLM)';
   return null;
 }
 
@@ -167,7 +166,7 @@ const SubmitPage: React.FC = () => {
 
               <FormGroup legendText="Invoice Document">
                 <p style={{ fontSize: '0.75rem', color: 'var(--cds-text-secondary)', marginBottom: '0.75rem' }}>
-                  Accepted: PDF · PNG · JPG/JPEG · TIFF
+                  Accepted: PDF · PNG · JPG/JPEG
                 </p>
                 <FileUploaderDropContainer
                   labelText="Drag and drop a file here, or click to upload"

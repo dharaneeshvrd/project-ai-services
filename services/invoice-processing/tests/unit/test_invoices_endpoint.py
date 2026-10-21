@@ -155,19 +155,6 @@ class TestSubmitInvoice:
 
         assert resp.status_code == 202
 
-    def test_tiff_accepted(self, client):
-        with patch("api.v1.invoices._stage_uploaded_file") as mock_stage, \
-             patch("api.v1.invoices.db_manager") as mock_mgr, \
-             patch("api.v1.invoices.asyncio.create_task"):
-            mock_stage.return_value = MagicMock()
-            mock_mgr.create_job.return_value = MagicMock()
-
-            resp = client.post(
-                "/v1/invoices",
-                files={"file": ("scan.tiff", io.BytesIO(b"II*\x00"), "image/tiff")},
-            )
-
-        assert resp.status_code == 202
 
 
 # ---------------------------------------------------------------------------
