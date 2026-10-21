@@ -101,31 +101,40 @@ def call_vllm(
 
 
 def _allow_null_for_optional(schema: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a copy of *schema* where every non-required top-level property
-    whose ``type`` is a single string has ``null`` added as an allowed type.
+    """Return a copy of *schema* where every non-required property whose
+    ``type`` is a single string has ``null`` added as an allowed type.
 
-    LLMs routinely return ``null`` for optional fields that are absent from
-    the source document.  This is semantically correct — the schema's strict
-    single-type declaration (e.g. ``"type": "string"``) describes the expected
-    value shape, not a prohibition on absence.  Expanding to
-    ``["string", "null"]`` for non-required properties makes validation match
-    real-world model behaviour without weakening required-field enforcement.
-
-    Only top-level ``properties`` are adjusted; nested object schemas are left
-    unchanged because guided decoding already constrains their structure.
+    Recurses into nested ``object`` schemas so that fields like
+    ``invoice_details.due_date`` are relaxed too.
     """
     import copy
     schema = copy.deepcopy(schema)
+    _relax_properties(schema)
+    return schema
+
+
+def _relax_properties(schema: Dict[str, Any]) -> None:
+    """Mutate *schema* in place: allow ``null`` on non-required properties,
+    recursing into nested objects and ``items`` of arrays."""
     required: set = set(schema.get("required", []))
     for prop_name, prop_def in schema.get("properties", {}).items():
-        if prop_name in required or not isinstance(prop_def, dict):
+        if not isinstance(prop_def, dict):
             continue
-        t = prop_def.get("type")
-        if isinstance(t, str) and t != "null":
-            prop_def["type"] = [t, "null"]
-        elif isinstance(t, list) and "null" not in t:
-            prop_def["type"] = t + ["null"]
-    return schema
+        # Recurse into nested objects
+        if prop_def.get("type") == "object" and "properties" in prop_def:
+            _relax_properties(prop_def)
+        # Recurse into array items that are objects
+        if prop_def.get("type") == "array":
+            items = prop_def.get("items", {})
+            if isinstance(items, dict) and items.get("type") == "object" and "properties" in items:
+                _relax_properties(items)
+        # Allow null for non-required properties
+        if prop_name not in required:
+            t = prop_def.get("type")
+            if isinstance(t, str) and t != "null":
+                prop_def["type"] = [t, "null"]
+            elif isinstance(t, list) and "null" not in t:
+                prop_def["type"] = t + ["null"]
 
 
 def validate_output(raw_text: str, normalized_schema: Dict[str, Any]) -> Dict[str, Any]:
