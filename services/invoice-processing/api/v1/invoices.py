@@ -60,7 +60,7 @@ def _job_to_response(job) -> InvoiceJobDetailResponse:
     summary="Submit invoice document for processing",
 )
 async def submit_invoice(
-    file: UploadFile = File(..., description="Invoice file (.pdf / .png / .jpg / .jpeg / .tiff)"),
+    file: UploadFile = File(..., description="Invoice file (.pdf / .png / .jpg / .jpeg)"),
 ):
     """Accept an invoice file, detect its type, create a job record, and dispatch
     the pipeline in the background.

@@ -10,7 +10,7 @@ from common.misc_utils import get_logger
 logger = get_logger("pipeline.router")
 
 PDF_EXTENSIONS = {".pdf"}
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 
 def detect_input_type(filename: str) -> Literal["pdf", "image"]:
@@ -33,5 +33,5 @@ def detect_input_type(filename: str) -> Literal["pdf", "image"]:
         logger.info(f"Routing {filename!r} → One-Shot (image) path")
         return "image"
     raise ValueError(
-        f"Unsupported file type: {suffix!r}. Accepted: .pdf, .png, .jpg, .jpeg, .tiff"
+        f"Unsupported file type: {suffix!r}. Accepted: .pdf, .png, .jpg, .jpeg"
     )
