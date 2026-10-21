@@ -20,6 +20,7 @@ import requests as requests_lib
 
 from fastapi import HTTPException
 from extract.utils.vllm import (
+    _allow_null_for_optional,
     build_messages,
     render_few_shot_block,
     strip_markdown_fences,
@@ -271,6 +272,69 @@ class TestValidateOutput:
         result = validate_output(json.dumps(with_extra), SIMPLE_SCHEMA)
         assert result["unexpected_field"] == "ok"
 
+    def test_null_optional_field_passes(self):
+        """null for a non-required field must pass validation."""
+        output = {**VALID_EXTRACTION, "currency": None}
+        result = validate_output(json.dumps(output), SIMPLE_SCHEMA)
+        assert result["currency"] is None
+
+    def test_null_required_field_fails(self):
+        """null for a required field must still fail validation."""
+        output = {**VALID_EXTRACTION, "invoice_number": None}
+        with pytest.raises(ValueError):
+            validate_output(json.dumps(output), SIMPLE_SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# _allow_null_for_optional
+# ---------------------------------------------------------------------------
+
+class TestAllowNullForOptional:
+    _SCHEMA = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age":  {"type": "integer"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "multi": {"type": ["string", "number"]},
+        },
+        "required": ["name"],
+    }
+
+    def test_required_field_unchanged(self):
+        out = _allow_null_for_optional(self._SCHEMA)
+        assert out["properties"]["name"]["type"] == "string"
+
+    def test_optional_string_gets_null(self):
+        out = _allow_null_for_optional(self._SCHEMA)
+        assert out["properties"]["age"]["type"] == ["integer", "null"]
+
+    def test_optional_array_gets_null(self):
+        out = _allow_null_for_optional(self._SCHEMA)
+        assert "null" in out["properties"]["tags"]["type"]
+
+    def test_optional_multi_type_gets_null(self):
+        out = _allow_null_for_optional(self._SCHEMA)
+        assert "null" in out["properties"]["multi"]["type"]
+
+    def test_does_not_duplicate_null(self):
+        schema = {
+            "type": "object",
+            "properties": {"x": {"type": ["string", "null"]}},
+            "required": [],
+        }
+        out = _allow_null_for_optional(schema)
+        assert out["properties"]["x"]["type"].count("null") == 1
+
+    def test_original_schema_not_mutated(self):
+        original = {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": [],
+        }
+        _allow_null_for_optional(original)
+        assert original["properties"]["x"]["type"] == "string"
+
 
 # ---------------------------------------------------------------------------
 # ExtractionRequest model
@@ -403,7 +467,8 @@ class TestExtractSyncEndpoint:
             content=b"not json at all",
             headers={"Content-Type": "application/json"},
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "INVALID_REQUEST"
 
     def test_400_missing_schema_id_and_name(self, extract_test_client):
         """Neither schema_id nor schema_name → 400 INVALID_REQUEST."""
@@ -1004,3 +1069,192 @@ def _setup_happy_path(monkeypatch, schema_row, input_tokens: int, raw_output: st
 
 # Alias to avoid shadowing the `json` parameter name inside _mock_post
 json_module_dumps = json.dumps
+
+
+# ===========================================================================
+# POST /v1/extract — image path (multipart/form-data)
+# ===========================================================================
+
+# Minimal valid image bytes (magic bytes only — not real images, but sufficient for tests)
+_MINIMAL_PNG = (
+    b"\x89PNG\r\n\x1a\n"
+    b"\x00\x00\x00\rIHDR"
+    b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+    b"\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18"
+    b"\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+_MINIMAL_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 60
+_MINIMAL_TIFF = b"II\x2a\x00" + b"\x00" * 60
+
+
+def _make_vision_settings_mock(vision_present: bool = True):
+    """Settings mock for image-path tests."""
+    s = Mock()
+    s.extract.vision_model_present = vision_present
+    s.extract.max_files_per_job = 32
+    s.extract.output_token_factor = 2.0
+    return s
+
+
+def _make_async_cm():
+    from unittest.mock import MagicMock, AsyncMock as _AM
+    cm = MagicMock()
+    cm.__aenter__ = _AM(return_value=None)
+    cm.__aexit__ = _AM(return_value=False)
+    return cm
+
+
+class TestExtractSyncImagePath:
+    """Tests for POST /v1/extract with multipart/form-data image uploads."""
+
+    def _post_image(self, client, filename: str, content: bytes,
+                    media_type: str = "image/png", schema_id: str = "schema-001"):
+        return client.post(
+            "/v1/extract",
+            data={"schema_id": schema_id},
+            files=[("file", (filename, content, media_type))],
+        )
+
+    def _common_image_patches(self, monkeypatch, schema_row=None, extraction=None):
+        """Wire up all mocks needed for a successful image extraction."""
+        import asyncio as _asyncio
+        if schema_row is None:
+            schema_row = _mock_schema_row()
+        if extraction is None:
+            extraction = VALID_EXTRACTION
+
+        raw = json.dumps(extraction)
+        monkeypatch.setattr("extract.api.v1.jobs.db_repo.get_schema_by_id",
+                            Mock(return_value=schema_row))
+        monkeypatch.setattr("extract.api.v1.jobs.compute_reserved_output",
+                            Mock(return_value=512))
+        monkeypatch.setattr("extract.api.v1.jobs.concurrency_limiter",
+                            _asyncio.BoundedSemaphore(1))
+        monkeypatch.setattr(
+            "extract.api.v1.jobs.call_vllm_with_length_retry",
+            AsyncMock(return_value=(raw, {"prompt_tokens": 300, "completion_tokens": 60}, 512)),
+        )
+        monkeypatch.setattr(
+            "extract.api.v1.jobs.validate_with_retry",
+            AsyncMock(return_value=(extraction, 1, 0, 0)),
+        )
+        monkeypatch.setattr(
+            "extract.api.v1.jobs.settings",
+            _make_vision_settings_mock(vision_present=True),
+        )
+
+    # ── acceptance ────────────────────────────────────────────────────
+
+    def test_200_png_accepted(self, extract_test_client, monkeypatch):
+        self._common_image_patches(monkeypatch)
+        resp = self._post_image(extract_test_client, "invoice.png", _MINIMAL_PNG)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["data"]["extraction"] == VALID_EXTRACTION
+        assert body["data"]["source"]["input_type"] == "image"
+        assert body["data"]["source"]["filename"] == "invoice.png"
+
+    def test_200_jpg_accepted(self, extract_test_client, monkeypatch):
+        self._common_image_patches(monkeypatch)
+        resp = self._post_image(extract_test_client, "scan.jpg", _MINIMAL_JPEG, "image/jpeg")
+        assert resp.status_code == 200
+        assert resp.json()["data"]["source"]["input_type"] == "image"
+
+    def test_200_tiff_accepted(self, extract_test_client, monkeypatch):
+        self._common_image_patches(monkeypatch)
+        resp = self._post_image(extract_test_client, "doc.tiff", _MINIMAL_TIFF, "image/tiff")
+        assert resp.status_code == 200
+
+    # ── rejection ─────────────────────────────────────────────────────
+
+    def test_415_pdf_rejected(self, extract_test_client):
+        resp = self._post_image(
+            extract_test_client, "report.pdf", b"%PDF-1.4 fake", "application/pdf"
+        )
+        assert resp.status_code == 415
+        assert resp.json()["error"]["code"] == "UNSUPPORTED_FILE_TYPE"
+
+    def test_415_no_vision_model(self, extract_test_client, monkeypatch):
+        monkeypatch.setattr(
+            "extract.api.v1.jobs.settings",
+            _make_vision_settings_mock(vision_present=False),
+        )
+        resp = self._post_image(extract_test_client, "invoice.png", _MINIMAL_PNG)
+        assert resp.status_code == 415
+        assert resp.json()["error"]["code"] == "UNSUPPORTED_FILE_TYPE"
+
+    def test_415_unknown_content_type(self, extract_test_client):
+        resp = extract_test_client.post(
+            "/v1/extract",
+            content=b"some bytes",
+            headers={"Content-Type": "text/plain"},
+        )
+        assert resp.status_code == 415
+
+    # ── response shape ────────────────────────────────────────────────
+
+    def test_200_response_has_meta_and_usage(self, extract_test_client, monkeypatch):
+        self._common_image_patches(monkeypatch)
+        resp = self._post_image(extract_test_client, "invoice.png", _MINIMAL_PNG)
+        body = resp.json()
+        assert "meta" in body
+        assert "model" in body["meta"]
+        assert "processing_time_ms" in body["meta"]
+        assert "validation_attempts" in body["meta"]
+        assert body["usage"]["input_tokens"] == 300
+        assert body["usage"]["output_tokens"] == 60
+        assert body["usage"]["total_tokens"] == 360
+
+    def test_200_schema_id_in_response(self, extract_test_client, monkeypatch):
+        self._common_image_patches(monkeypatch)
+        resp = self._post_image(extract_test_client, "invoice.png", _MINIMAL_PNG)
+        assert resp.json()["data"]["schema_id"] == "schema-001"
+
+    # ── build_vision_messages error ────────────────────────────────────
+
+    def test_415_build_vision_messages_failure(self, extract_test_client, monkeypatch):
+        """If build_vision_messages raises the endpoint returns 415."""
+        self._common_image_patches(monkeypatch)
+        monkeypatch.setattr(
+            "extract.api.v1.jobs.build_vision_messages",
+            Mock(side_effect=OSError("cannot read image")),
+        )
+        resp = self._post_image(extract_test_client, "invoice.png", _MINIMAL_PNG)
+        assert resp.status_code == 415
+        assert "prepare image" in resp.json()["error"]["message"]
+
+    # ── LLM errors ────────────────────────────────────────────────────
+
+    def test_503_vllm_unreachable(self, extract_test_client, monkeypatch):
+        self._common_image_patches(monkeypatch)
+        monkeypatch.setattr(
+            "extract.api.v1.jobs.call_vllm_with_length_retry",
+            AsyncMock(side_effect=HTTPException(
+                status_code=503,
+                detail={"error": {"code": "LLM_UNAVAILABLE", "message": "unreachable", "status": 503}},
+            )),
+        )
+        resp = self._post_image(extract_test_client, "invoice.png", _MINIMAL_PNG)
+        assert resp.status_code == 503
+
+    def test_422_validation_failure(self, extract_test_client, monkeypatch):
+        self._common_image_patches(monkeypatch)
+        monkeypatch.setattr(
+            "extract.api.v1.jobs.validate_with_retry",
+            AsyncMock(side_effect=HTTPException(
+                status_code=422,
+                detail={"error": {"code": "EXTRACTION_VALIDATION_FAILED",
+                                  "message": "schema mismatch", "status": 422}},
+            )),
+        )
+        resp = self._post_image(extract_test_client, "invoice.png", _MINIMAL_PNG)
+        assert resp.status_code == 422
+
+    # ── 429 semaphore ─────────────────────────────────────────────────
+
+    def test_429_when_semaphore_locked(self, extract_test_client, monkeypatch):
+        locked = Mock()
+        locked.locked = Mock(return_value=True)
+        monkeypatch.setattr("extract.api.v1.jobs.concurrency_limiter", locked)
+        resp = self._post_image(extract_test_client, "invoice.png", _MINIMAL_PNG)
+        assert resp.status_code == 429

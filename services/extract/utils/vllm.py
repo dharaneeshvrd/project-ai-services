@@ -14,6 +14,7 @@ from common.misc_utils import get_logger
 from common.error_utils import APIError, ErrorCode
 from extract.settings import settings
 from extract.state import concurrency_limiter
+from extract.utils.schema import compute_reserved_output
 
 logger = get_logger("vllm_utils")
 
@@ -99,6 +100,43 @@ def call_vllm(
     return response.json()
 
 
+def _allow_null_for_optional(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of *schema* where every non-required property whose
+    ``type`` is a single string has ``null`` added as an allowed type.
+
+    Recurses into nested ``object`` schemas so that fields like
+    ``invoice_details.due_date`` are relaxed too.
+    """
+    import copy
+    schema = copy.deepcopy(schema)
+    _relax_properties(schema)
+    return schema
+
+
+def _relax_properties(schema: Dict[str, Any]) -> None:
+    """Mutate *schema* in place: allow ``null`` on non-required properties,
+    recursing into nested objects and ``items`` of arrays."""
+    required: set = set(schema.get("required", []))
+    for prop_name, prop_def in schema.get("properties", {}).items():
+        if not isinstance(prop_def, dict):
+            continue
+        # Recurse into nested objects
+        if prop_def.get("type") == "object" and "properties" in prop_def:
+            _relax_properties(prop_def)
+        # Recurse into array items that are objects
+        if prop_def.get("type") == "array":
+            items = prop_def.get("items", {})
+            if isinstance(items, dict) and items.get("type") == "object" and "properties" in items:
+                _relax_properties(items)
+        # Allow null for non-required properties
+        if prop_name not in required:
+            t = prop_def.get("type")
+            if isinstance(t, str) and t != "null":
+                prop_def["type"] = [t, "null"]
+            elif isinstance(t, list) and "null" not in t:
+                prop_def["type"] = t + ["null"]
+
+
 def validate_output(raw_text: str, normalized_schema: Dict[str, Any]) -> Dict[str, Any]:
     """
     Parse and validate the model output against *normalized_schema*.
@@ -106,6 +144,10 @@ def validate_output(raw_text: str, normalized_schema: Dict[str, Any]) -> Dict[st
     Returns the parsed dict on success.
     Raises ``ValueError`` whose message lists all schema errors (used as
     the retry-append payload).
+
+    Non-required properties are permitted to be ``null`` even when the schema
+    declares a stricter type — models routinely return ``null`` for absent
+    optional fields, which is semantically correct.
     """
     cleaned = strip_markdown_fences(raw_text)
     try:
@@ -113,7 +155,8 @@ def validate_output(raw_text: str, normalized_schema: Dict[str, Any]) -> Dict[st
     except json.JSONDecodeError as exc:
         raise ValueError(f"Output is not valid JSON: {exc}") from exc
 
-    validator = Draft202012Validator(normalized_schema)
+    relaxed_schema = _allow_null_for_optional(normalized_schema)
+    validator = Draft202012Validator(relaxed_schema)
     errors = list(validator.iter_errors(parsed))
     if errors:
         raise ValueError("; ".join(e.message for e in errors))
@@ -164,6 +207,79 @@ async def call_vllm_safe(
         APIError.raise_error(ErrorCode.LLM_ERROR, f"Unexpected error during LLM call{label}.")
 
 
+async def call_vllm_with_length_retry(
+    messages: List[Dict[str, Any]],
+    reserved_output: int,
+    schema_tokens: int,
+    json_schema: Dict[str, Any],
+    llm_endpoint: str,
+    llm_model: str,
+) -> Tuple[str, Dict[str, Any], int]:
+    """Call vLLM and retry once with a boosted output budget on ``finish_reason=length``.
+
+    Encapsulates the repeated call → empty-choices guard → length-retry →
+    second empty-choices guard → second length-fail pattern that appears in
+    both the sync endpoint and the batch ``process_file`` pipeline.
+
+    Args:
+        messages:        Chat messages for the completion request.
+        reserved_output: Initial output token budget.
+        schema_tokens:   Schema token count used to compute the boosted budget.
+        json_schema:     Normalised JSON schema (for guided decoding).
+        llm_endpoint:    Base URL of the vLLM endpoint.
+        llm_model:       Model name passed in the payload.
+
+    Returns:
+        A 3-tuple of:
+        - ``raw_output``: The raw string content from the chosen completion.
+        - ``usage``:      The ``usage`` dict from the final vLLM response.
+        - ``reserved_output``: The (possibly boosted) token budget that was used.
+
+    Raises:
+        HTTPException(503/500) from :func:`call_vllm_safe` on LLM failure.
+        HTTPException(413)     if output is still truncated after the retry.
+        HTTPException(500)     if either call returns an empty choices list.
+    """
+    resp = await call_vllm_safe(messages, reserved_output, json_schema, llm_endpoint, llm_model)
+
+    choices = resp.get("choices", [])
+    if not choices:
+        APIError.raise_error(ErrorCode.LLM_ERROR, "vLLM returned an empty choices list.")
+
+    choice = choices[0]
+    if choice.get("finish_reason") == "length":
+        boosted = compute_reserved_output(
+            schema_tokens,
+            output_token_factor=1.5 * settings.extract.output_token_factor,
+        )
+        logger.warning(
+            "finish_reason=length; retrying with boosted reserved_output=%d (was %d)",
+            boosted, reserved_output,
+        )
+        resp = await call_vllm_safe(
+            messages, boosted, json_schema, llm_endpoint, llm_model, is_retry=True
+        )
+        choices = resp.get("choices", [])
+        if not choices:
+            APIError.raise_error(ErrorCode.LLM_ERROR, "vLLM returned an empty choices list.")
+        choice = choices[0]
+        if choice.get("finish_reason") == "length":
+            msg = (
+                "The model output was truncated because it reached the reserved "
+                "output token limit."
+            )
+            logger.error(f"{msg} (boosted_reserved_output={boosted})")
+            APIError.raise_error(
+                ErrorCode.CONTEXT_LIMIT_EXCEEDED,
+                msg,
+                details={"reserved_output_tokens": boosted, "finish_reason": "length"},
+            )
+        reserved_output = boosted
+
+    raw_output: str = choice.get("message", {}).get("content", "") or ""
+    return raw_output, resp.get("usage", {}), reserved_output
+
+
 async def validate_with_retry(
     raw_output: str,
     messages: List[Dict[str, str]],
@@ -212,7 +328,6 @@ async def validate_with_retry(
             "content": (
                 "Your previous output failed validation with these errors:\n"
                 f"{first_val_err}\n\n"
-                f"Previous output:\n{raw_output}\n\n"
                 "Return a corrected JSON object that fixes ALL listed errors. "
                 "Output ONLY the JSON."
             ),
@@ -246,6 +361,7 @@ async def validate_with_retry(
     except ValueError as retry_err:
         msg = f"Model output failed schema validation after one retry: {retry_err}"
         logger.error(msg)
+        logger.error(raw_retry_output)
         APIError.raise_error(ErrorCode.EXTRACTION_VALIDATION_FAILED, msg)
     except Exception as e:
         logger.error(e)

@@ -70,8 +70,13 @@ CREATE TABLE IF NOT EXISTS extract_documents (
     created_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at            TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_doc_status      CHECK (status IN ('pending','in_progress','completed','failed')),
-    CONSTRAINT chk_doc_source_type CHECK (source_type IN ('txt','md'))
+    CONSTRAINT chk_doc_source_type CHECK (source_type IN ('txt','md','png','jpg','jpeg','tiff','tif'))
 );
+
+-- Migration: extend source_type constraint to include image types (idempotent)
+ALTER TABLE extract_documents DROP CONSTRAINT IF EXISTS chk_doc_source_type;
+ALTER TABLE extract_documents ADD CONSTRAINT chk_doc_source_type
+    CHECK (source_type IN ('txt','md','png','jpg','jpeg','tiff','tif'));
 
 CREATE INDEX IF NOT EXISTS idx_extract_documents_job_id
     ON extract_documents(job_id);

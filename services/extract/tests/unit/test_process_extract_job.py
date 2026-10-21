@@ -145,49 +145,6 @@ def _make_async_cm_mock():
     return cm
 
 
-def _standard_patches(
-    *,
-    job_row=None,
-    schema_row=None,
-    file_text: str = "INVOICE #INV-001 Vendor: Acme TOTAL: EUR 100",
-    input_tokens: int = 50,
-    reserved_output: int = 512,
-    vllm_response=None,
-    validate_return=None,
-    update_job_return: bool = True,
-):
-    """
-    Return a dict of patch targets and their configured mocks for the happy path.
-    Callers override individual entries as needed.
-    """
-    if job_row is None:
-        job_row = _mock_job_row()
-    if schema_row is None:
-        schema_row = _mock_schema_row()
-    if vllm_response is None:
-        vllm_response = _vllm_response(VALID_EXTRACTION_JSON)
-    if validate_return is None:
-        validate_return = (VALID_EXTRACTION, 1, 0, 0)
-
-    patches = {
-        # Semaphores: replaced with loop-agnostic async context-manager mocks.
-        "extract.state.job_limiter": _make_async_cm_mock(),
-        "extract.api.v1.jobs.concurrency_limiter": _make_async_cm_mock(),
-        "extract.api.v1.jobs.get_llm_endpoint": Mock(return_value=LLM_DICT),
-        "extract.api.v1.jobs.db_repo.get_job_by_id": Mock(return_value=job_row),
-        "extract.api.v1.jobs.db_repo.update_job": Mock(return_value=update_job_return),
-        "extract.api.v1.jobs._resolve_schema_id": Mock(return_value=schema_row),
-        "extract.api.v1.jobs._tokenize": Mock(return_value=input_tokens),
-        "extract.api.v1.jobs.check_extraction_budget": Mock(return_value=reserved_output),
-        "extract.api.v1.jobs.render_few_shot_block": Mock(return_value=""),
-        "extract.api.v1.jobs.build_messages": Mock(return_value=[{"role": "user", "content": "..."}]),
-        "extract.api.v1.jobs.call_vllm_safe": AsyncMock(return_value=vllm_response),
-        "extract.api.v1.jobs.validate_with_retry": AsyncMock(return_value=validate_return),
-        "extract.api.v1.jobs.cleanup_staging_directory": Mock(),
-    }
-    return patches
-
-
 def _apply_patches(patches: dict):
     """Context-manager stack for all patch targets."""
     from contextlib import ExitStack
@@ -304,6 +261,9 @@ def _standard_file_patches(
     if validate_return is None:
         validate_return = (VALID_EXTRACTION, 1, 0, 0)
 
+    # call_vllm_with_length_retry returns (raw_str, usage_dict, reserved_int)
+    raw_str = vllm_response.get("choices", [{}])[0].get("message", {}).get("content", "") if vllm_response.get("choices") else ""
+    usage = vllm_response.get("usage", {})
     return {
         "extract.state.parallel_file_limiter": _make_async_cm_mock(),
         "extract.utils.job.concurrency_limiter": _make_async_cm_mock(),
@@ -312,7 +272,7 @@ def _standard_file_patches(
         "extract.utils.job.check_extraction_budget": Mock(return_value=reserved_output),
         "extract.utils.job.render_few_shot_block": Mock(return_value=""),
         "extract.utils.job.build_messages": Mock(return_value=[{"role": "user", "content": "..."}]),
-        "extract.utils.job.call_vllm_safe": AsyncMock(return_value=vllm_response),
+        "extract.utils.job.call_vllm_with_length_retry": AsyncMock(return_value=(raw_str, usage, reserved_output)),
         "extract.utils.job.validate_with_retry": AsyncMock(return_value=validate_return),
         # Default settings mock — prevents real /var/cache writes in any test that
         # reaches the write stage without explicitly overriding settings.
@@ -532,26 +492,28 @@ class TestStep3TokenGuard:
 
 class TestStep4VllmCall:
     def test_vllm_connection_error_marks_doc_failed(self):
+        """call_vllm_with_length_retry raising HTTPException marks doc failed."""
         p = _standard_file_patches()
-        p["extract.utils.job.call_vllm_safe"] = AsyncMock(
-            side_effect=Exception("unreachable")
+        p["extract.utils.job.call_vllm_with_length_retry"] = AsyncMock(
+            side_effect=_http_exc("LLM_UNAVAILABLE", "unreachable", 503)
+        )
+        _run_process_file(p, b"text content")
+
+        calls = p["extract.utils.job.db_repo.update_document"].call_args_list
+        failed = next(c for c in calls if c.kwargs.get("status") == "failed")
+        assert "unreachable" in failed.kwargs.get("error", "")
+
+    def test_vllm_generic_error_marks_doc_failed(self):
+        """Any HTTPException from call_vllm_with_length_retry marks doc failed."""
+        p = _standard_file_patches()
+        p["extract.utils.job.call_vllm_with_length_retry"] = AsyncMock(
+            side_effect=_http_exc("LLM_ERROR", "internal error", 500)
         )
         _run_process_file(p, b"text content")
 
         calls = p["extract.utils.job.db_repo.update_document"].call_args_list
         failed = next(c for c in calls if c.kwargs.get("status") == "failed")
         assert failed.kwargs.get("status") == "failed"
-
-    def test_empty_choices_marks_doc_failed(self):
-        p = _standard_file_patches()
-        p["extract.utils.job.call_vllm_safe"] = AsyncMock(
-            return_value={"choices": [], "usage": {}}
-        )
-        _run_process_file(p, b"text content")
-
-        calls = p["extract.utils.job.db_repo.update_document"].call_args_list
-        failed = next(c for c in calls if c.kwargs.get("status") == "failed")
-        assert "empty choices" in failed.kwargs.get("error", "")
 
 
 
@@ -560,70 +522,39 @@ class TestStep4VllmCall:
 # ===========================================================================
 
 class TestStep5LengthRetry:
-    def test_length_retry_succeeds_with_boosted_budget(self):
-        """First call returns length; second call returns a valid extraction."""
-        first_resp = _vllm_response("", finish_reason="length")
-        second_resp = _vllm_response(VALID_EXTRACTION_JSON, finish_reason="stop")
+    """Length-retry logic now lives inside call_vllm_with_length_retry (vllm.py).
 
+    At the job.py level we only verify that:
+    - a boosted reserved_output returned by the helper is recorded as max_tokens_adjusted
+    - an HTTPException(413) from the helper (budget still exceeded) marks the doc failed
+    """
+
+    def test_boosted_reserved_output_sets_max_tokens_adjusted(self):
+        """When helper returns a larger reserved_output the metadata flag is set."""
+        usage = {"prompt_tokens": 500, "completion_tokens": 80}
         p = _standard_file_patches()
-        p["extract.utils.job.call_vllm_safe"] = AsyncMock(
-            side_effect=[first_resp, second_resp]
+        # Return a reserved_output larger than the initial 512 to simulate a retry
+        p["extract.utils.job.call_vllm_with_length_retry"] = AsyncMock(
+            return_value=(VALID_EXTRACTION_JSON, usage, 768)  # 768 > 512 (default reserved)
         )
         _run_process_file(p, b"text content")
 
         calls = p["extract.utils.job.db_repo.update_document"].call_args_list
-        statuses = [c.kwargs.get("status") for c in calls if "status" in c.kwargs]
-        assert "completed" in statuses
+        completed_call = next(c for c in calls if c.kwargs.get("status") == "completed")
+        diag = completed_call.kwargs.get("metadata", {}).get("token_diagnostics", {})
+        assert diag.get("max_tokens_adjusted") is True
 
-    def test_length_on_retry_marks_output_budget_exceeded(self):
-        """Both first and retry calls return finish_reason=length."""
-        length_resp = _vllm_response("", finish_reason="length")
-
+    def test_context_limit_from_helper_marks_doc_failed(self):
+        """HTTPException(413) from helper (truncated after retry) marks doc failed."""
         p = _standard_file_patches()
-        p["extract.utils.job.call_vllm_safe"] = AsyncMock(
-            side_effect=[length_resp, length_resp]
+        p["extract.utils.job.call_vllm_with_length_retry"] = AsyncMock(
+            side_effect=_http_exc("CONTEXT_LIMIT_EXCEEDED", "truncated", 413)
         )
         _run_process_file(p, b"text content")
 
         calls = p["extract.utils.job.db_repo.update_document"].call_args_list
         failed = next(c for c in calls if c.kwargs.get("status") == "failed")
         assert "truncated" in failed.kwargs.get("error", "")
-
-    def test_vllm_error_on_length_retry_marks_doc_failed(self):
-        length_resp = _vllm_response("", finish_reason="length")
-
-        p = _standard_file_patches()
-        p["extract.utils.job.call_vllm_safe"] = AsyncMock(
-            side_effect=[length_resp, _http_exc("LLM_ERROR", "crash on retry", 500)]
-        )
-        _run_process_file(p, b"text content")
-
-        calls = p["extract.utils.job.db_repo.update_document"].call_args_list
-        failed = next(c for c in calls if c.kwargs.get("status") == "failed")
-        assert failed.kwargs.get("error") == "crash on retry"
-
-    def test_length_retry_uses_boosted_max_tokens(self):
-        """compute_reserved_output is called with a higher factor after length."""
-        length_resp = _vllm_response("", finish_reason="length")
-        good_resp = _vllm_response(VALID_EXTRACTION_JSON)
-
-        p = _standard_file_patches()
-        p["extract.utils.job.call_vllm_safe"] = AsyncMock(
-            side_effect=[length_resp, good_resp]
-        )
-        compute_mock = Mock(return_value=768)
-        p["extract.utils.job.compute_reserved_output"] = compute_mock
-
-        schema_row = _mock_schema_row()
-        _run_process_file(p, b"text content", schema_row=schema_row)
-
-        compute_mock.assert_called_once()
-        _, kwargs = compute_mock.call_args
-        # The boosted factor should be 1.5× the base (2.0 default from settings)
-        # In the actual code it reads settings.extract.output_token_factor, but since
-        # settings isn't mocked here, it will use the real default (2.0). Just verify
-        # compute_reserved_output was called with some output_token_factor.
-        assert "output_token_factor" in kwargs
 
 
 # ===========================================================================
@@ -773,8 +704,8 @@ class TestHappyPath:
             "extract.utils.job.validate_with_retry": AsyncMock(
                 return_value=(VALID_EXTRACTION, 2, 50, 30)
             ),
-            "extract.utils.job.call_vllm_safe": AsyncMock(
-                return_value=_vllm_response(VALID_EXTRACTION_JSON, prompt_tokens=400, completion_tokens=80)
+            "extract.utils.job.call_vllm_with_length_retry": AsyncMock(
+                return_value=(VALID_EXTRACTION_JSON, {"prompt_tokens": 400, "completion_tokens": 80}, 512)
             ),
         }
         p, _, _ = self._run_happy_path(extra_patches=extra)

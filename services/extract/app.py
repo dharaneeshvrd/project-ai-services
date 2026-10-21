@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.openapi.docs import get_swagger_ui_html
 from common.error_utils import APIError, ErrorCode, http_exception_handler
 from common.misc_utils import configure_uvicorn_logging, create_llm_session, get_llm_endpoint, get_logger, set_log_level, set_request_id
+from extract.settings import VISION_MODEL_NAMES
 from common.diagnostic_logger import setup_comprehensive_crash_handler
 from extract.db.connection import check_db_connection, close_db_connections, engine
 from extract.db.models import Base
@@ -83,6 +84,18 @@ async def lifespan(app: FastAPI):
     configure_uvicorn_logging(settings.common.app.log_level, ["/health"])
     create_llm_session(pool_maxsize=settings.common.llm.max_batch_size)
     initialize_models()
+
+    # Detect whether the loaded model supports vision and stamp the flag so
+    # request validation and process_file can branch without extra env vars.
+    _loaded_model: str = llm_model_dict.get("llm_model", "")
+    settings.extract.vision_model_present = _loaded_model in VISION_MODEL_NAMES
+    if settings.extract.vision_model_present:
+        logger.info(f"Vision model detected: {_loaded_model!r} — image extraction enabled")
+    else:
+        logger.info(
+            f"Model {_loaded_model!r} is not a known vision model — image extraction disabled"
+        )
+
     calculate_prompt_overhead_tokens(llm_model_dict.get("llm_endpoint", ""))
     _initialize_database()
     ensure_directories()
