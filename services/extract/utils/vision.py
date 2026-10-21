@@ -15,11 +15,13 @@ that the vision model's output is constrained to the target schema.
 
 import asyncio
 import base64
+import io
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from PIL import Image
 
 import common.misc_utils as misc_utils
 from common.llm_utils import get_vllm_headers
@@ -38,6 +40,9 @@ _EXT_MIME: Dict[str, str] = {
     ".tiff": "image/tiff",
     ".tif": "image/tiff",
 }
+
+# TIFF is not supported by most vision model APIs — convert to PNG before sending.
+_TIFF_EXTENSIONS = frozenset({".tiff", ".tif"})
 
 IMAGE_EXTENSIONS = frozenset(_EXT_MIME.keys())
 
@@ -69,9 +74,16 @@ def build_vision_messages(
     Returns:
         A messages list ready to pass to the ``/v1/chat/completions`` endpoint.
     """
-    raw_bytes = image_path.read_bytes()
+    if image_path.suffix.lower() in _TIFF_EXTENSIONS:
+        img = Image.open(image_path)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        raw_bytes = buf.getvalue()
+        mime_type = "image/png"
+    else:
+        raw_bytes = image_path.read_bytes()
+        mime_type = get_image_mime_type(image_path)
     b64_data = base64.b64encode(raw_bytes).decode("ascii")
-    mime_type = get_image_mime_type(image_path)
     data_url = f"data:{mime_type};base64,{b64_data}"
 
     schema_str = json.dumps(normalized_schema, ensure_ascii=False)
