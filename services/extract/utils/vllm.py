@@ -100,6 +100,34 @@ def call_vllm(
     return response.json()
 
 
+def _allow_null_for_optional(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of *schema* where every non-required top-level property
+    whose ``type`` is a single string has ``null`` added as an allowed type.
+
+    LLMs routinely return ``null`` for optional fields that are absent from
+    the source document.  This is semantically correct — the schema's strict
+    single-type declaration (e.g. ``"type": "string"``) describes the expected
+    value shape, not a prohibition on absence.  Expanding to
+    ``["string", "null"]`` for non-required properties makes validation match
+    real-world model behaviour without weakening required-field enforcement.
+
+    Only top-level ``properties`` are adjusted; nested object schemas are left
+    unchanged because guided decoding already constrains their structure.
+    """
+    import copy
+    schema = copy.deepcopy(schema)
+    required: set = set(schema.get("required", []))
+    for prop_name, prop_def in schema.get("properties", {}).items():
+        if prop_name in required or not isinstance(prop_def, dict):
+            continue
+        t = prop_def.get("type")
+        if isinstance(t, str) and t != "null":
+            prop_def["type"] = [t, "null"]
+        elif isinstance(t, list) and "null" not in t:
+            prop_def["type"] = t + ["null"]
+    return schema
+
+
 def validate_output(raw_text: str, normalized_schema: Dict[str, Any]) -> Dict[str, Any]:
     """
     Parse and validate the model output against *normalized_schema*.
@@ -107,6 +135,10 @@ def validate_output(raw_text: str, normalized_schema: Dict[str, Any]) -> Dict[st
     Returns the parsed dict on success.
     Raises ``ValueError`` whose message lists all schema errors (used as
     the retry-append payload).
+
+    Non-required properties are permitted to be ``null`` even when the schema
+    declares a stricter type — models routinely return ``null`` for absent
+    optional fields, which is semantically correct.
     """
     cleaned = strip_markdown_fences(raw_text)
     try:
@@ -114,7 +146,8 @@ def validate_output(raw_text: str, normalized_schema: Dict[str, Any]) -> Dict[st
     except json.JSONDecodeError as exc:
         raise ValueError(f"Output is not valid JSON: {exc}") from exc
 
-    validator = Draft202012Validator(normalized_schema)
+    relaxed_schema = _allow_null_for_optional(normalized_schema)
+    validator = Draft202012Validator(relaxed_schema)
     errors = list(validator.iter_errors(parsed))
     if errors:
         raise ValueError("; ".join(e.message for e in errors))
@@ -319,6 +352,7 @@ async def validate_with_retry(
     except ValueError as retry_err:
         msg = f"Model output failed schema validation after one retry: {retry_err}"
         logger.error(msg)
+        logger.error(raw_retry_output)
         APIError.raise_error(ErrorCode.EXTRACTION_VALIDATION_FAILED, msg)
     except Exception as e:
         logger.error(e)

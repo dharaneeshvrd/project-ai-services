@@ -82,7 +82,7 @@ def build_vision_messages(
         "",
         "Rules:",
         "1. Extract values EXACTLY as they appear in the image (preserve numbers, dates, identifiers verbatim).",
-        "2. If a non-required property is not visible in the image, omit it or set it to null. NEVER invent values.",
+        "2. If a non-required property is not visible in the image, use an empty string for string fields or omit it. NEVER invent values.",
         "3. Required properties must be populated from the image.",
         "4. Output ONLY the JSON object. Do not add explanations, markdown fences, or any other text.",
     ]

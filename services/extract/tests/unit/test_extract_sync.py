@@ -20,6 +20,7 @@ import requests as requests_lib
 
 from fastapi import HTTPException
 from extract.utils.vllm import (
+    _allow_null_for_optional,
     build_messages,
     render_few_shot_block,
     strip_markdown_fences,
@@ -270,6 +271,69 @@ class TestValidateOutput:
         with_extra = {**VALID_EXTRACTION, "unexpected_field": "ok"}
         result = validate_output(json.dumps(with_extra), SIMPLE_SCHEMA)
         assert result["unexpected_field"] == "ok"
+
+    def test_null_optional_field_passes(self):
+        """null for a non-required field must pass validation."""
+        output = {**VALID_EXTRACTION, "currency": None}
+        result = validate_output(json.dumps(output), SIMPLE_SCHEMA)
+        assert result["currency"] is None
+
+    def test_null_required_field_fails(self):
+        """null for a required field must still fail validation."""
+        output = {**VALID_EXTRACTION, "invoice_number": None}
+        with pytest.raises(ValueError):
+            validate_output(json.dumps(output), SIMPLE_SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# _allow_null_for_optional
+# ---------------------------------------------------------------------------
+
+class TestAllowNullForOptional:
+    _SCHEMA = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age":  {"type": "integer"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "multi": {"type": ["string", "number"]},
+        },
+        "required": ["name"],
+    }
+
+    def test_required_field_unchanged(self):
+        out = _allow_null_for_optional(self._SCHEMA)
+        assert out["properties"]["name"]["type"] == "string"
+
+    def test_optional_string_gets_null(self):
+        out = _allow_null_for_optional(self._SCHEMA)
+        assert out["properties"]["age"]["type"] == ["integer", "null"]
+
+    def test_optional_array_gets_null(self):
+        out = _allow_null_for_optional(self._SCHEMA)
+        assert "null" in out["properties"]["tags"]["type"]
+
+    def test_optional_multi_type_gets_null(self):
+        out = _allow_null_for_optional(self._SCHEMA)
+        assert "null" in out["properties"]["multi"]["type"]
+
+    def test_does_not_duplicate_null(self):
+        schema = {
+            "type": "object",
+            "properties": {"x": {"type": ["string", "null"]}},
+            "required": [],
+        }
+        out = _allow_null_for_optional(schema)
+        assert out["properties"]["x"]["type"].count("null") == 1
+
+    def test_original_schema_not_mutated(self):
+        original = {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": [],
+        }
+        _allow_null_for_optional(original)
+        assert original["properties"]["x"]["type"] == "string"
 
 
 # ---------------------------------------------------------------------------
