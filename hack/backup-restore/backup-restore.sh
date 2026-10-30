@@ -737,6 +737,20 @@ import json, os, sys, tarfile, tempfile
 from pathlib import Path
 from opensearchpy import OpenSearch, helpers
 
+# Current index schema version.
+# v1: metadata fields nested under a "metadata" object (no _meta marker)
+# v2: metadata fields flattened to the top level, _meta.schema_version=2
+SCHEMA_VERSION = 2
+
+# Suffix used for the temporary index during in-place migration.
+MIGRATION_INDEX_SUFFIX = "__migrating"
+
+# Painless script that moves every key of the legacy "metadata" object to the top level.
+FLATTEN_METADATA_SCRIPT = (
+    "def m = ctx._source.remove('metadata');"
+    "if (m instanceof Map) { for (def e : m.entrySet()) { ctx._source[e.getKey()] = e.getValue(); } }"
+)
+
 class BackupRestorer:
     def __init__(self, backup_file):
         self.backup_file = backup_file
@@ -750,7 +764,99 @@ class BackupRestorer:
             http_auth=("admin", password),
             verify_certs=False, ssl_show_warn=False, timeout=30
         )
-    
+
+    def _get_schema_version(self, index_name):
+        """Return schema version of an existing index (1 = legacy, 2 = current)."""
+        response = self.client.indices.get_mapping(index=index_name)
+        mappings = next(iter(response.values()), {}).get("mappings", {})
+        version = mappings.get("_meta", {}).get("schema_version")
+        if version is not None:
+            return int(version)
+        # No _meta marker: legacy if "metadata" nested object is present
+        return 1 if "metadata" in mappings.get("properties", {}) else SCHEMA_VERSION
+
+    def _current_mapping(self, index_name):
+        """Return a v2 mapping body for index_name, preserving the original settings."""
+        dim = self._get_embedding_dimension(index_name)
+        return {
+            "_meta": {"schema_version": SCHEMA_VERSION},
+            "properties": {
+                "chunk_id":     {"type": "long", "doc_values": True},
+                "embedding":    {"type": "knn_vector", "dimension": dim,
+                                 "method": {"name": "hnsw", "space_type": "cosinesimil",
+                                            "engine": "lucene",
+                                            "parameters": {"ef_construction": 128, "m": 24}}},
+                "text":         {"type": "text", "analyzer": "standard", "store": True},
+                "filename":     {"type": "keyword"},
+                "doc_id":       {"type": "keyword"},
+                "type":         {"type": "keyword"},
+                "source":       {"type": "keyword"},
+                "language":     {"type": "keyword"},
+                "page_number":  {"type": "integer"},
+                "chunk_index":  {"type": "integer"},
+                "total_chunks": {"type": "integer"},
+                "created_at":   {"type": "date"},
+            }
+        }
+
+    def _get_embedding_dimension(self, index_name):
+        response = self.client.indices.get_mapping(index=index_name)
+        mappings = next(iter(response.values()))["mappings"]
+        return mappings["properties"]["embedding"]["dimension"]
+
+    def _get_index_settings(self, index_name):
+        """Return clean index settings (stripped of read-only OpenSearch internals)."""
+        response = self.client.indices.get_settings(index=index_name)
+        idx_settings = response[index_name]["settings"]["index"]
+        for key in ["creation_date", "uuid", "version", "provided_name"]:
+            idx_settings.pop(key, None)
+        return idx_settings
+
+    def _migrate_if_legacy(self, index_name):
+        """Upgrade a legacy (v1) index to the current (v2) schema in-place.
+
+        Uses the same two-index swap strategy as the digitize service:
+          1. Create <index>__migrating with v2 mapping
+          2. Reindex <index> -> <index>__migrating, flattening "metadata" via Painless
+          3. Delete <index>, recreate with v2 mapping
+          4. Reindex <index>__migrating -> <index>
+          5. Delete <index>__migrating
+        """
+        if self._get_schema_version(index_name) >= SCHEMA_VERSION:
+            return
+
+        print(f"    Detected legacy schema (v1) — migrating {index_name} to v{SCHEMA_VERSION}...")
+        temp = f"{index_name}{MIGRATION_INDEX_SUFFIX}"
+        idx_settings = self._get_index_settings(index_name)
+
+        # Step 1-2: copy legacy -> temp with flatten script
+        if self.client.indices.exists(index=temp):
+            self.client.indices.delete(index=temp)
+        self.client.indices.create(index=temp,
+            body={"settings": {"index": idx_settings}, "mappings": self._current_mapping(index_name)})
+        self.client.indices.refresh(index=index_name)
+        resp = self.client.reindex(
+            body={"source": {"index": index_name}, "dest": {"index": temp},
+                  "script": {"lang": "painless", "source": FLATTEN_METADATA_SCRIPT}},
+            wait_for_completion=True, refresh=True, request_timeout=3600)
+        if resp.get("failures"):
+            raise RuntimeError(f"Migration reindex {index_name}->{temp} had failures: {resp['failures']}")
+
+        # Step 3-4: swap: delete legacy, recreate v2, copy from temp
+        self.client.indices.delete(index=index_name)
+        self.client.indices.create(index=index_name,
+            body={"settings": {"index": idx_settings}, "mappings": self._current_mapping(temp)})
+        self.client.indices.refresh(index=temp)
+        resp = self.client.reindex(
+            body={"source": {"index": temp}, "dest": {"index": index_name}},
+            wait_for_completion=True, refresh=True, request_timeout=3600)
+        if resp.get("failures"):
+            raise RuntimeError(f"Migration reindex {temp}->{index_name} had failures: {resp['failures']}")
+
+        # Step 5: clean up temp
+        self.client.indices.delete(index=temp)
+        print(f"    ✓ Migration complete — {index_name} is now schema v{SCHEMA_VERSION}")
+
     def restore_index(self, index_name, temp_dir):
         print(f"  Restoring index: {index_name}")
         os_dir = temp_dir / "backup" / "opensearch"
@@ -774,7 +880,9 @@ class BackupRestorer:
             actions = [{"_index": index_name, "_id": doc["_id"], "_source": doc["_source"]} for doc in documents]
             success, errors = helpers.bulk(self.client, actions, stats_only=False, raise_on_error=False, refresh=True)
             print(f"    ✓ {success} documents restored")
-    
+        # Migrate to current schema immediately so digitize finds a ready v2 index.
+        self._migrate_if_legacy(index_name)
+
     def run(self):
         print("Connecting to OpenSearch...")
         info = self.client.info()
@@ -1177,6 +1285,20 @@ import json, os, sys
 from pathlib import Path
 from opensearchpy import OpenSearch, helpers
 
+# Current index schema version.
+# v1: metadata fields nested under a "metadata" object (no _meta marker)
+# v2: metadata fields flattened to the top level, _meta.schema_version=2
+SCHEMA_VERSION = 2
+
+# Suffix used for the temporary index during in-place migration.
+MIGRATION_INDEX_SUFFIX = "__migrating"
+
+# Painless script that moves every key of the legacy "metadata" object to the top level.
+FLATTEN_METADATA_SCRIPT = (
+    "def m = ctx._source.remove('metadata');"
+    "if (m instanceof Map) { for (def e : m.entrySet()) { ctx._source[e.getKey()] = e.getValue(); } }"
+)
+
 class OpenSearchRestore:
     def __init__(self):
         self.backup_dir = Path("/tmp/opensearch_backup")
@@ -1188,42 +1310,136 @@ class OpenSearchRestore:
             http_auth=("admin", password),
             use_ssl=True, verify_certs=False, ssl_show_warn=False, timeout=30
         )
-    
+
+    def _get_schema_version(self, index_name):
+        """Return schema version of an existing index (1 = legacy, 2 = current)."""
+        response = self.client.indices.get_mapping(index=index_name)
+        mappings = next(iter(response.values()), {}).get("mappings", {})
+        version = mappings.get("_meta", {}).get("schema_version")
+        if version is not None:
+            return int(version)
+        # No _meta marker: legacy if "metadata" nested object is present
+        return 1 if "metadata" in mappings.get("properties", {}) else SCHEMA_VERSION
+
+    def _current_mapping(self, index_name):
+        """Return a v2 mapping body for index_name."""
+        dim = self._get_embedding_dimension(index_name)
+        return {
+            "_meta": {"schema_version": SCHEMA_VERSION},
+            "properties": {
+                "chunk_id":     {"type": "long", "doc_values": True},
+                "embedding":    {"type": "knn_vector", "dimension": dim,
+                                 "method": {"name": "hnsw", "space_type": "cosinesimil",
+                                            "engine": "lucene",
+                                            "parameters": {"ef_construction": 128, "m": 24}}},
+                "text":         {"type": "text", "analyzer": "standard", "store": True},
+                "filename":     {"type": "keyword"},
+                "doc_id":       {"type": "keyword"},
+                "type":         {"type": "keyword"},
+                "source":       {"type": "keyword"},
+                "language":     {"type": "keyword"},
+                "page_number":  {"type": "integer"},
+                "chunk_index":  {"type": "integer"},
+                "total_chunks": {"type": "integer"},
+                "created_at":   {"type": "date"},
+            }
+        }
+
+    def _get_embedding_dimension(self, index_name):
+        response = self.client.indices.get_mapping(index=index_name)
+        mappings = next(iter(response.values()))["mappings"]
+        return mappings["properties"]["embedding"]["dimension"]
+
+    def _get_index_settings(self, index_name):
+        """Return clean index settings (stripped of read-only OpenSearch internals)."""
+        response = self.client.indices.get_settings(index=index_name)
+        idx_settings = response[index_name]["settings"]["index"]
+        for key in ["creation_date", "uuid", "version", "provided_name"]:
+            idx_settings.pop(key, None)
+        return idx_settings
+
+    def _migrate_if_legacy(self, index_name):
+        """Upgrade a legacy (v1) index to the current (v2) schema in-place.
+
+        Uses the same two-index swap strategy as the digitize service:
+          1. Create <index>__migrating with v2 mapping
+          2. Reindex <index> -> <index>__migrating, flattening "metadata" via Painless
+          3. Delete <index>, recreate with v2 mapping
+          4. Reindex <index>__migrating -> <index>
+          5. Delete <index>__migrating
+        """
+        if self._get_schema_version(index_name) >= SCHEMA_VERSION:
+            return
+
+        print(f"    Detected legacy schema (v1) — migrating {index_name} to v{SCHEMA_VERSION}...")
+        temp = f"{index_name}{MIGRATION_INDEX_SUFFIX}"
+        idx_settings = self._get_index_settings(index_name)
+
+        # Step 1-2: copy legacy -> temp with flatten script
+        if self.client.indices.exists(index=temp):
+            self.client.indices.delete(index=temp)
+        self.client.indices.create(index=temp,
+            body={"settings": {"index": idx_settings}, "mappings": self._current_mapping(index_name)})
+        self.client.indices.refresh(index=index_name)
+        resp = self.client.reindex(
+            body={"source": {"index": index_name}, "dest": {"index": temp},
+                  "script": {"lang": "painless", "source": FLATTEN_METADATA_SCRIPT}},
+            wait_for_completion=True, refresh=True, request_timeout=3600)
+        if resp.get("failures"):
+            raise RuntimeError(f"Migration reindex {index_name}->{temp} had failures: {resp['failures']}")
+
+        # Step 3-4: swap: delete legacy, recreate v2, copy from temp
+        self.client.indices.delete(index=index_name)
+        self.client.indices.create(index=index_name,
+            body={"settings": {"index": idx_settings}, "mappings": self._current_mapping(temp)})
+        self.client.indices.refresh(index=temp)
+        resp = self.client.reindex(
+            body={"source": {"index": temp}, "dest": {"index": index_name}},
+            wait_for_completion=True, refresh=True, request_timeout=3600)
+        if resp.get("failures"):
+            raise RuntimeError(f"Migration reindex {temp}->{index_name} had failures: {resp['failures']}")
+
+        # Step 5: clean up temp
+        self.client.indices.delete(index=temp)
+        print(f"    ✓ Migration complete — {index_name} is now schema v{SCHEMA_VERSION}")
+
     def restore_index(self, index_name, backup_dir):
         print(f"  Restoring index: {index_name}")
         with open(backup_dir / f"{index_name}_settings.json") as f:
             settings = json.load(f)
         with open(backup_dir / f"{index_name}_mapping.json") as f:
             mapping = json.load(f)
-        
+
         if self.client.indices.exists(index=index_name):
             print(f"    Deleting existing index...")
             self.client.indices.delete(index=index_name)
-        
+
         idx_settings = settings[index_name]["settings"]["index"]
         for key in ["creation_date", "uuid", "version", "provided_name"]:
             idx_settings.pop(key, None)
-        
+
         self.client.indices.create(
             index=index_name,
             body={"settings": {"index": idx_settings}, "mappings": mapping[index_name]["mappings"]}
         )
-        
+
         with open(backup_dir / f"{index_name}_data.json") as f:
             documents = json.load(f)
-        
+
         if documents:
             actions = [{"_index": index_name, "_id": doc["_id"], "_source": doc["_source"]} for doc in documents]
             success, _ = helpers.bulk(self.client, actions, stats_only=False, raise_on_error=False, refresh=True)
             print(f"    ✓ {success} documents restored")
+            # Migrate to current schema immediately so digitize finds a ready v2 index.
+            self._migrate_if_legacy(index_name)
             return success
         return 0
-    
+
     def run(self):
         if not self.backup_dir.exists():
             print(f"ERROR: Backup directory not found: {self.backup_dir}")
             sys.exit(1)
-        
+
         indices = [f.stem.replace("_data", "") for f in self.backup_dir.glob("*_data.json")]
         print(f"Found {len(indices)} indices to restore")
         total_docs = 0
