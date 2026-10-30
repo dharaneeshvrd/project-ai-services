@@ -1,0 +1,134 @@
+[
+  {
+    "label": "v2 (update-opensearch-client)",
+    "chunks": 1000,
+    "insert": {
+      "wall_sec": 22.764,
+      "chunks_per_sec": 43.93
+    },
+    "search": {
+      "dense": {
+        "n": 150,
+        "mean_ms": 6.2741,
+        "p50_ms": 5.8899,
+        "p95_ms": 8.6908,
+        "p99_ms": 9.6807
+      },
+      "sparse": {
+        "n": 150,
+        "mean_ms": 5.4292,
+        "p50_ms": 4.9778,
+        "p95_ms": 7.8792,
+        "p99_ms": 9.1653
+      },
+      "hybrid": {
+        "n": 150,
+        "mean_ms": 7.369,
+        "p50_ms": 6.5291,
+        "p95_ms": 11.142,
+        "p99_ms": 12.1418
+      }
+    },
+    "retrieval": {
+      "dense": {
+        "n": 300,
+        "mean_ms": 6.1767,
+        "p50_ms": 5.7553,
+        "p95_ms": 8.7435,
+        "p99_ms": 13.3138
+      },
+      "sparse": {
+        "n": 300,
+        "mean_ms": 5.2895,
+        "p50_ms": 4.8446,
+        "p95_ms": 8.2237,
+        "p99_ms": 10.7905
+      },
+      "hybrid": {
+        "n": 300,
+        "mean_ms": 7.4402,
+        "p50_ms": 6.8934,
+        "p95_ms": 10.3544,
+        "p99_ms": 14.4396
+      }
+    },
+    "payload": {
+      "dense": {
+        "response_bytes": 61981,
+        "first_hit_bytes": 12376,
+        "n_hits": 5
+      },
+      "sparse": {
+        "response_bytes": 61716,
+        "first_hit_bytes": 12183,
+        "n_hits": 5
+      }
+    }
+  },
+  {
+    "label": "v1 (main)",
+    "chunks": 1000,
+    "insert": {
+      "wall_sec": 22.77,
+      "chunks_per_sec": 43.92
+    },
+    "search": {
+      "dense": {
+        "n": 150,
+        "mean_ms": 6.0337,
+        "p50_ms": 5.7371,
+        "p95_ms": 7.892,
+        "p99_ms": 9.7463
+      },
+      "sparse": {
+        "n": 150,
+        "mean_ms": 4.9778,
+        "p50_ms": 4.8162,
+        "p95_ms": 6.0563,
+        "p99_ms": 8.0123
+      },
+      "hybrid": {
+        "n": 150,
+        "mean_ms": 7.4663,
+        "p50_ms": 6.9732,
+        "p95_ms": 9.7834,
+        "p99_ms": 14.8066
+      }
+    },
+    "retrieval": {
+      "dense": {
+        "n": 300,
+        "mean_ms": 6.64,
+        "p50_ms": 6.5091,
+        "p95_ms": 8.0631,
+        "p99_ms": 10.7854
+      },
+      "sparse": {
+        "n": 300,
+        "mean_ms": 5.8189,
+        "p50_ms": 5.5803,
+        "p95_ms": 7.6055,
+        "p99_ms": 11.7459
+      },
+      "hybrid": {
+        "n": 300,
+        "mean_ms": 9.0735,
+        "p50_ms": 8.7938,
+        "p95_ms": 11.1037,
+        "p99_ms": 13.5817
+      }
+    },
+    "payload": {
+      "dense": {
+        "response_bytes": 62051,
+        "first_hit_bytes": 12390,
+        "n_hits": 5
+      },
+      "sparse": {
+        "response_bytes": 61786,
+        "first_hit_bytes": 12197,
+        "n_hits": 5
+      }
+    }
+  }
+]
