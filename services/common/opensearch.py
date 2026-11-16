@@ -1,7 +1,9 @@
 import numpy as np
 import hashlib
+import threading
 from tqdm import tqdm
 from opensearchpy import OpenSearch, helpers
+from opensearchpy.exceptions import NotFoundError
 
 from common.misc_utils import get_logger
 from common.vector_db import VectorStore, VectorStoreNotReadyError
@@ -9,6 +11,27 @@ from common.retry_utils import retry_on_transient_error
 from common.settings import settings
 
 logger = get_logger("OpenSearch")
+
+# Index layout version, stored in the index mapping under "_meta.schema_version".
+#   1 - legacy: metadata fields nested under a "metadata" object (no _meta marker)
+#   2 - current: metadata fields flattened to the top level
+SCHEMA_VERSION = 2
+
+# Suffix of the temporary index used while migrating a legacy index in place.
+MIGRATION_INDEX_SUFFIX = "__migrating"
+
+# Timeout (seconds) for a single _reindex call during migration.
+MIGRATION_REQUEST_TIMEOUT = 3600
+
+# Painless script that moves every key of the legacy "metadata" object to the top level.
+_FLATTEN_METADATA_SCRIPT = (
+    "def m = ctx._source.remove('metadata');"
+    "if (m instanceof Map) { for (def e : m.entrySet()) { ctx._source[e.getKey()] = e.getValue(); } }"
+)
+
+# Serialises migration and write-path schema checks across threads in one process.
+# Digitize (the only writer) runs as a single replica, so this is sufficient.
+_migration_lock = threading.Lock()
 
 
 def generate_chunk_id(doc_id: str, page_content: str) -> np.int64:
@@ -50,7 +73,12 @@ class OpensearchVectorStore(VectorStore):
                 settings.vector_store.opensearch_password.get_secret_value(),
             ),
             verify_certs=False,
-            ssl_show_warn=False
+            ssl_assert_hostname=False,
+            ssl_show_warn=False,
+            # Increase connection pool size (3.2.0+) to reduce indexing
+            # latency under concurrent bulk-insert load
+            pool_maxsize=20,
+            retry_on_timeout=True,
         )
 
         logger.debug("OpenSearch client initialized successfully")
@@ -87,31 +115,35 @@ class OpensearchVectorStore(VectorStore):
             logger.error(f"Failed to create hybrid search pipeline: {e}")
             raise
 
-    @retry_on_transient_error(max_retries=3, initial_delay=5.0, backoff_multiplier=2.0)
-    def _setup_index(self, dim):
-        logger.debug(f"Setting up index {self.index_name} with dimension {dim}")
+    def _index_body(self, dim):
+        """Return the settings and mappings for a current-schema index.
 
-        if self.client.indices.exists(index=self.index_name):
-            return
-
-        logger.debug(f"Creating new index {self.index_name}")
-
-        # index body: setting and mappings
-        index_body = {
+        All metadata fields are stored at the top level so they can be read back
+        via docvalue_fields at query time. _source is intentionally kept enabled:
+        backup/restore and _reindex (used for schema migration) depend on it.
+        """
+        return {
             "settings": {
                 "index": {
                     "knn": True,  # Enable k-NN search functionality
                     "knn.algo_param.ef_search": 100,  # Number of candidates to consider during search (higher = more accurate but slower)
                     "number_of_shards": self.num_shards,  # Number of primary shards for data distribution
-                    'auto_expand_replicas': '0-all' # dynamically set the replicas based on nodes
+                    "auto_expand_replicas": "0-all"  # dynamically set the replicas based on nodes
                 }
             },
             "mappings": {
+                # Layout version marker, used to detect legacy indexes (e.g. restored
+                # from an older backup) that need migration.
+                "_meta": {"schema_version": SCHEMA_VERSION},
                 "properties": {
                     # Unique identifier for each chunk, generated from doc_id and content hash
-                    "chunk_id": {"type": "long"},
-                    
-                    # Vector embedding field for semantic search
+                    # doc_values=True is the default for long — kept explicit for clarity
+                    "chunk_id": {"type": "long", "doc_values": True},
+
+                    # Vector embedding field for semantic search.
+                    # knn_vector does not support doc_values; it is retrieved via
+                    # the knn engine itself and is intentionally excluded from
+                    # docvalue_fields at query time.
                     "embedding": {
                         "type": "knn_vector",
                         "dimension": dim,
@@ -125,38 +157,153 @@ class OpensearchVectorStore(VectorStore):
                             }
                         }
                     },
-                    
-                    # The actual text content of the chunk for keyword search and retrieval
+
+                    # The actual text content of the chunk for keyword search and retrieval.
+                    # Text fields do not support doc_values; store=True lets us
+                    # retrieve the value via stored_fields instead.
                     "text": {
                         "type": "text",
-                        "analyzer": "standard"
+                        "analyzer": "standard",
+                        "store": True
                     },
-                    
-                    # Metadata container for document attributes
-                    "metadata": {
-                        "dynamic": "true",  # Allow additional metadata fields to be added dynamically
-                        "properties": {
-                            "filename": {"type": "keyword"},  # Original filename
-                            "doc_id": {"type": "keyword"},  # Unique document identifier (UUID)
-                            "type": {"type": "keyword"},  # Document type (e.g., text, table)
-                            "source": {"type": "keyword"},  # Source of the text e.g: Chapter -> Section etc..
-                            "language": {"type": "keyword"},  # Language code (e.g., 'en', 'de') for language-specific filtering
-                            "page_number": {"type": "integer"},  # Page number where this chunk originated
-                            "chunk_index": {"type": "integer"},  # Sequential index of this chunk within the document
-                            "total_chunks": {"type": "integer"},  # Total number of chunks in the parent document
-                            "created_at": {"type": "date"}  # Timestamp when the chunk was indexed
-                        }
-                    }
+
+                    # --- Flattened metadata fields (formerly nested under "metadata") ---
+                    # All are keyword/integer/date which have doc_values by default.
+                    "filename":     {"type": "keyword"},   # Original filename
+                    "doc_id":       {"type": "keyword"},   # Unique document identifier (UUID)
+                    "type":         {"type": "keyword"},   # Document type (e.g., text, table)
+                    "source":       {"type": "keyword"},   # Source of the text e.g: Chapter -> Section etc.
+                    "language":     {"type": "keyword"},   # Language code (e.g., 'en', 'de')
+                    "page_number":  {"type": "integer"},   # Page number where this chunk originated
+                    "chunk_index":  {"type": "integer"},   # Sequential index of this chunk within the document
+                    "total_chunks": {"type": "integer"},   # Total number of chunks in the parent document
+                    "created_at":   {"type": "date"}       # Timestamp when the chunk was indexed
                 }
             }
         }
-        # Create the Index
+
+    def _get_schema_version(self, index):
+        """Return the layout version of ``index``, or None if it does not exist.
+
+        Indexes without a ``_meta.schema_version`` marker that still contain the
+        nested ``metadata`` object are legacy (version 1).
+        """
         try:
-            self.client.indices.create(index=self.index_name, body=index_body)
-            logger.debug(f"Index {self.index_name} created successfully with {dim} dimensions")
+            response = self.client.indices.get_mapping(index=index)
+        except NotFoundError:
+            return None
+
+        mappings = next(iter(response.values()), {}).get("mappings", {})
+        version = mappings.get("_meta", {}).get("schema_version")
+        if version is not None:
+            return int(version)
+        return 1 if "metadata" in mappings.get("properties", {}) else SCHEMA_VERSION
+
+    def _get_embedding_dimension(self, index):
+        response = self.client.indices.get_mapping(index=index)
+        mappings = next(iter(response.values()))["mappings"]
+        return mappings["properties"]["embedding"]["dimension"]
+
+    def _create_index(self, index, dim):
+        try:
+            self.client.indices.create(index=index, body=self._index_body(dim))
+            logger.debug(f"Index {index} created successfully with {dim} dimensions")
         except Exception as e:
-            logger.error(f"Failed to create index {self.index_name}: {e}")
+            logger.error(f"Failed to create index {index}: {e}")
             raise
+
+    def _copy_index(self, source, dest, script=None):
+        """Copy all documents from ``source`` to ``dest`` and verify the document count."""
+        self.client.indices.refresh(index=source)
+
+        body = {"source": {"index": source}, "dest": {"index": dest}}
+        if script:
+            body["script"] = {"lang": "painless", "source": script}
+
+        response = self.client.reindex(
+            body=body,
+            wait_for_completion=True,
+            refresh=True,
+            request_timeout=MIGRATION_REQUEST_TIMEOUT,
+        )
+        failures = response.get("failures") or []
+        if failures:
+            raise RuntimeError(f"Reindex {source} -> {dest} reported {len(failures)} failures")
+
+        source_count = self.client.count(index=source)["count"]
+        dest_count = self.client.count(index=dest)["count"]
+        if dest_count != source_count:
+            raise RuntimeError(
+                f"Reindex {source} -> {dest} count mismatch: source={source_count}, dest={dest_count}"
+            )
+        logger.info(f"Copied {dest_count} documents from {source} to {dest}")
+
+    def migrate_legacy_index(self):
+        """Migrate a legacy (schema v1) index in place to the current layout.
+
+        The index name is kept unchanged so existing backup/restore tooling keeps
+        working. Steps:
+          1. create <index>__migrating with the current mapping
+          2. reindex <index> -> <index>__migrating, flattening "metadata"
+          3. delete <index> and recreate it with the current mapping
+          4. reindex <index>__migrating -> <index>
+          5. delete <index>__migrating
+
+        Data always exists in at least one of the two indexes, so an interrupted
+        migration is resumed on the next call.
+
+        Returns:
+            str: "absent", "current", or "migrated"
+        """
+        main = self.index_name
+        temp = f"{main}{MIGRATION_INDEX_SUFFIX}"
+
+        with _migration_lock:
+            main_version = self._get_schema_version(main)
+            temp_version = self._get_schema_version(temp)
+
+            if temp_version is None:
+                if main_version is None:
+                    return "absent"
+                if main_version >= SCHEMA_VERSION:
+                    return "current"
+
+            logger.info(
+                f"Migrating index {main} to schema v{SCHEMA_VERSION} "
+                f"(index version: {main_version}, temp index present: {temp_version is not None})"
+            )
+
+            if main_version is not None and main_version < SCHEMA_VERSION:
+                # Fresh start, or an attempt interrupted before the legacy index was
+                # deleted. The legacy index is intact, so (re)build the temp copy.
+                if temp_version is not None:
+                    self.client.indices.delete(index=temp)
+                self._create_index(temp, self._get_embedding_dimension(main))
+                self._copy_index(main, temp, script=_FLATTEN_METADATA_SCRIPT)
+                self.client.indices.delete(index=main)
+                main_version = None
+
+            if main_version is None:
+                self._create_index(main, self._get_embedding_dimension(temp))
+
+            # Copying again is safe if a previous attempt was interrupted
+            # mid-copy: documents keep their _id and are overwritten.
+            self._copy_index(temp, main)
+            self.client.indices.delete(index=temp)
+
+            logger.info(f"Index {main} migrated to schema v{SCHEMA_VERSION}")
+            return "migrated"
+
+    @retry_on_transient_error(max_retries=3, initial_delay=5.0, backoff_multiplier=2.0)
+    def _setup_index(self, dim):
+        logger.debug(f"Setting up index {self.index_name} with dimension {dim}")
+
+        # Upgrade a legacy index (e.g. restored from an old backup) before writing to it.
+        if self.migrate_legacy_index() != "absent":
+            return
+
+        logger.debug(f"Creating new index {self.index_name}")
+        self._create_index(self.index_name, dim)
 
     @retry_on_transient_error(max_retries=3, initial_delay=5.0, backoff_multiplier=2.0)
     def insert_chunks(self, chunks, vectors=None, embedding=None, batch_size=10, cancel_event=None):
@@ -257,6 +404,9 @@ class OpensearchVectorStore(VectorStore):
                 if doc.get("created_at") is not None:
                     metadata["created_at"] = doc.get("created_at")
 
+                # Index all fields at the top level so OpenSearch stores them
+                # as doc_values columns (no nested metadata object);
+                # search retrieves them via docvalue_fields.
                 actions.append({
                     "_index": self.index_name,
                     "_id": str(cid),
@@ -264,7 +414,8 @@ class OpensearchVectorStore(VectorStore):
                         "chunk_id": cid,
                         "embedding": emb.tolist() if isinstance(emb, np.ndarray) else emb,
                         "text": pc,
-                        "metadata": metadata
+                        # Flattened metadata fields — top-level, not nested
+                        **metadata
                     }
                 })
 
@@ -311,9 +462,21 @@ class OpensearchVectorStore(VectorStore):
         logger.debug(f"Starting search operation: query='{query_text[:50]}...', top_k={top_k}, mode={mode}, language={language}")
 
         query = query_text
-        if not self.client.indices.exists(index=self.index_name):
+        schema_version = self._get_schema_version(self.index_name)
+        if schema_version is None:
             logger.error(f"Index {self.index_name} does not exist")
             raise OpensearchNotReadyError("Index is empty. Ingest documents first.")
+        if schema_version < SCHEMA_VERSION:
+            # Legacy layout (e.g. restored from an older backup). Querying it with the
+            # current field names would silently return no results, so fail clearly.
+            # The digitize service migrates the index on startup or its next write.
+            logger.error(
+                f"Index {self.index_name} uses legacy schema v{schema_version}; "
+                f"migration to v{SCHEMA_VERSION} pending"
+            )
+            raise OpensearchNotReadyError(
+                "Index migration pending. Restart the digitize service to upgrade the index."
+            )
 
         if vector is not None:
             logger.debug("Using pre-computed query vector")
@@ -334,46 +497,47 @@ class OpensearchVectorStore(VectorStore):
         logger.debug(f"Search mode: {mode}, limit: {limit}")
         params = {}
 
+        # Skip _source at query time (kept on the index for backup/reindex);
+        # retrieve field values via docvalue_fields (columnar) + stored_fields
+        # for "text" (text fields don't support doc_values, but store=True is set).
+        _retrieve = {
+            "_source": False,
+            "docvalue_fields": ["chunk_id", "filename", "doc_id", "type", "source",
+                                "language", "page_number", "chunk_index",
+                                "total_chunks", "created_at"],
+            "stored_fields": ["text"],
+        }
+        _lang_filter = {"term": {"language": language}} if language else None
+
         if mode == "dense":
-            # 1. Define the k-NN search body
             search_body = {
                 "size": top_k,
-                "_source": ["chunk_id", "text", "metadata"],
+                **_retrieve,
                 "query": {
                     "knn": {
                         "embedding": {
                             "vector": query_vector.tolist() if isinstance(query_vector, np.ndarray) else query_vector,
                             "k": limit,
-                            # Efficient pre-filtering
-                            "filter": {
-                                "term": {"metadata.language": language}
-                            } if language else {"match_all": {}}
+                            "filter": _lang_filter if _lang_filter else {"match_all": {}}
                         }
                     }
                 }
             }
         elif mode == "sparse":
-            # OpenSearch native Sparse Search (BM25 or Neural Sparse)
-            # Standard full-text match for sparse/keyword logic
             search_body = {
                 "size": top_k,
-                "_source": ["chunk_id", "text", "metadata"],
+                **_retrieve,
                 "query": {
                     "bool": {
-                        "must": [
-                            {"match": {"text": query}}
-                        ],
-                        "filter": [
-                            {"term": {"metadata.language": language}}
-                        ] if language else []
+                        "must": [{"match": {"text": query}}],
+                        "filter": [_lang_filter] if _lang_filter else []
                     }
                 }
             }
         elif mode == "hybrid":
-            # OpenSearch Hybrid Query combines Dense (k-NN) and Sparse (Match)
             search_body = {
-                "size": top_k, # Final number of results after fusion
-                "_source": ["chunk_id", "text", "metadata"],
+                "size": top_k,  # Final number of results after fusion
+                **_retrieve,
                 "query": {
                     "hybrid": {
                         "queries": [
@@ -383,7 +547,7 @@ class OpensearchVectorStore(VectorStore):
                                     "embedding": {
                                         "vector": query_vector.tolist() if isinstance(query_vector, np.ndarray) else query_vector,
                                         "k": limit,
-                                        "filter": {"term": {"metadata.language": language}} if language else None
+                                        "filter": _lang_filter
                                     }
                                 }
                             },
@@ -391,7 +555,7 @@ class OpensearchVectorStore(VectorStore):
                             {
                                 "bool": {
                                     "must": [{"match": {"text": query}}],
-                                    "filter": [{"term": {"metadata.language": language}}] if language else []
+                                    "filter": [_lang_filter] if _lang_filter else []
                                 }
                             }
                         ]
@@ -414,22 +578,44 @@ class OpensearchVectorStore(VectorStore):
             logger.error(f"Search query failed: {e}")
             raise
 
-        # Format results
+        # Format results — read from docvalue_fields / stored_fields since
+        # _source is not fetched. docvalue_fields returns each value as a list;
+        # unwrap the first element. stored_fields["text"] is also a list.
         results = []
         for idx, hit in enumerate(response["hits"]["hits"]):
-            source = hit["_source"]
-            # Flatten the structure for backward compatibility
-            result = {
-                "chunk_id": source.get("chunk_id"),
-                "text": source.get("text"),
-                "page_content": source.get("text"),  # Alias for backward compatibility
-                "score": hit["_score"]
+            fields = hit.get("fields", {})
+
+            def _fv(name, default=None):
+                """Unwrap a single docvalue / stored field list value."""
+                v = fields.get(name)
+                if v is None:
+                    return default
+                return v[0] if isinstance(v, list) else v
+
+            text = _fv("text")
+            metadata = {
+                "filename":     _fv("filename"),
+                "doc_id":       _fv("doc_id"),
+                "type":         _fv("type"),
+                "source":       _fv("source"),
+                "language":     _fv("language"),
+                "page_number":  _fv("page_number"),
+                "chunk_index":  _fv("chunk_index"),
+                "total_chunks": _fv("total_chunks"),
+                "created_at":   _fv("created_at"),
             }
-            # Add metadata fields
-            if "metadata" in source:
-                result.update(source["metadata"])
-                result["metadata"] = source["metadata"]  # Keep nested structure too
-            
+            # Strip None-valued metadata keys so downstream callers don't have to guard
+            metadata = {k: v for k, v in metadata.items() if v is not None}
+
+            result = {
+                "chunk_id":    _fv("chunk_id"),
+                "text":        text,
+                "page_content": text,   # Alias for backward compatibility
+                "score":       hit["_score"],
+                # Keep nested metadata dict for backward compatibility
+                "metadata":    metadata,
+                **metadata,             # Also flatten for direct field access
+            }
             results.append(result)
             logger.debug(f"Result {idx+1}: doc_id={result.get('doc_id', 'N/A')}, score={hit['_score']:.4f}")
 
@@ -469,16 +655,16 @@ class OpensearchVectorStore(VectorStore):
 
         logger.debug(f"Starting targeted cleanup of {len(doc_ids)} documents in {self.index_name}")
 
-        if not self.client.indices.exists(index=self.index_name):
+        # Upgrade a legacy index first so the top-level doc_id query matches.
+        if self.migrate_legacy_index() == "absent":
             logger.info(f"Index {self.index_name} does not exist.")
             return 0
 
-        # Construct terms query for batch deletion
-        # 'metadata.doc_id' is the nested keyword field in the mapping
+        # doc_id is now a top-level field (no longer nested under metadata)
         delete_query = {
             "query": {
                 "terms": {
-                    "metadata.doc_id": doc_ids
+                    "doc_id": doc_ids
                 }
             }
         }
@@ -512,7 +698,8 @@ class OpensearchVectorStore(VectorStore):
         """
         logger.debug(f"Starting delete operation for document {doc_id}")
 
-        if not self.client.indices.exists(index=self.index_name):
+        # Upgrade a legacy index first so the top-level doc_id query matches.
+        if self.migrate_legacy_index() == "absent":
             logger.error(f"Index {self.index_name} does not exist, nothing to delete")
             return 0
 
@@ -521,10 +708,11 @@ class OpensearchVectorStore(VectorStore):
         self.client.indices.refresh(index=self.index_name)
 
         # STEP 2: Perform the actual deletion
+        # doc_id is now a top-level field (no longer nested under metadata)
         delete_query = {
             "query": {
                 "term": {
-                    "metadata.doc_id": str(doc_id).strip()
+                    "doc_id": str(doc_id).strip()
                 }
             }
         }

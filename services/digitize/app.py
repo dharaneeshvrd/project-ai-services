@@ -128,6 +128,21 @@ def _recover_zombie_jobs():
     except Exception as exc:
         logger.error(f"Error during zombie job recovery: {exc}", exc_info=True)
 
+def _migrate_vector_store():
+    """Upgrade a legacy vector index (e.g. restored from an older backup) to the current schema.
+
+    Runs in a background thread so a long migration, or OpenSearch being
+    unavailable, does not block startup. Writes wait for the migration to finish,
+    and the same check runs again before every write.
+    """
+    try:
+        from common import db_utils
+        result = db_utils.get_vector_store().migrate_legacy_index()
+        logger.info(f"Vector store schema check completed: {result}")
+    except Exception as exc:
+        logger.error(f"Vector store schema migration failed: {exc}", exc_info=True)
+
+
 def _recover_conversion_tasks():
     """Recover stale conversion tasks left over from a previous app server run."""
     try:
@@ -250,6 +265,9 @@ async def lifespan(app: FastAPI):
     # Stale conversion task recovery on startup.
     _recover_conversion_tasks()
 
+    # Vector store schema migration (legacy index → current layout).
+    migration_task = asyncio.create_task(asyncio.to_thread(_migrate_vector_store))
+
     # Start conversion dispatcher.
     from digitize.workers.conversion_dispatcher import dispatch_loop
     dispatcher_task = asyncio.create_task(dispatch_loop())
@@ -265,6 +283,8 @@ async def lifespan(app: FastAPI):
         await dispatcher_task
     except asyncio.CancelledError:
         pass
+    if not migration_task.done():
+        logger.warning("Vector store migration still running at shutdown; it will resume on next start")
 
 
 
